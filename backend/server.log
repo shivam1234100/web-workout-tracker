@@ -1,0 +1,20 @@
+[dotenv@17.2.3] injecting env (0) from .env -- tip: ✅ audit secrets and track compliance: https://dotenvx.com/ops
+Server running on http://localhost:3000
+Registration Error: PrismaClientKnownRequestError: 
+Invalid `prisma.user.create()` invocation in
+/Users/shivamtiwari/Ai-Workout-Tracker/AI-Workout-Tracker/backend/dist/routes/auth.js:21:40
+
+  18 if (existingUser)
+  19     return res.status(400).json({ error: 'User already exists' });
+  20 const hashedPassword = await bcryptjs_1.default.hash(password, 10);
+→ 21 const user = await prisma.user.create(
+Prisma needs to perform transactions, which requires your MongoDB server to be run as a replica set. https://pris.ly/d/mongodb-replica-set
+    at $n.handleRequestError (/Users/shivamtiwari/Ai-Workout-Tracker/AI-Workout-Tracker/backend/node_modules/@prisma/client/runtime/library.js:121:7315)
+    at $n.handleAndLogRequestError (/Users/shivamtiwari/Ai-Workout-Tracker/AI-Workout-Tracker/backend/node_modules/@prisma/client/runtime/library.js:121:6623)
+    at $n.request (/Users/shivamtiwari/Ai-Workout-Tracker/AI-Workout-Tracker/backend/node_modules/@prisma/client/runtime/library.js:121:6307)
+    at async l (/Users/shivamtiwari/Ai-Workout-Tracker/AI-Workout-Tracker/backend/node_modules/@prisma/client/runtime/library.js:130:9633)
+    at async /Users/shivamtiwari/Ai-Workout-Tracker/AI-Workout-Tracker/backend/dist/routes/auth.js:21:22 {
+  code: 'P2031',
+  clientVersion: '5.22.0',
+  meta: { modelName: 'User' }
+}

@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String    @id @default(auto()) @map("_id") @db.ObjectId
+  email            String    @unique
+  password         String
+  name             String
+  resetToken       String?
+  resetTokenExpiry DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  workouts         Workout[]
+  chatMessages     ChatMessage[]
+  weeklySummaries  WeeklySummary[]
+}
+
+model Workout {
+  id        String     @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  date      DateTime
+  startTime DateTime?
+  endTime   DateTime?
+  userId    String     @db.ObjectId
+  user      User       @relation(fields: [userId], references: [id])
+  exercises Exercise[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+model Exercise {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  workoutId String   @db.ObjectId
+  workout   Workout  @relation(fields: [workoutId], references: [id], onDelete: Cascade)
+  sets      String   // Storing sets as JSON string for simplicity
+}
+
+model ChatMessage {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  role      String   // "user" | "assistant" | "system"
+  content   String
+  userId    String   @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+model WeeklySummary {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id])
+  weekStart DateTime
+  weekEnd   DateTime
+  summary   String   // AI-generated markdown summary
+  stats     String   // JSON string with computed stats
+  createdAt DateTime @default(now())
+}
