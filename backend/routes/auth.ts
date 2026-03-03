@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { Resend } from 'resend';
 import { PrismaClient } from '@prisma/client';
+import { authenticateToken } from '../middleware/auth';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -42,7 +43,7 @@ router.post('/register', async (req, res) => {
         });
 
         const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
-        res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
+        res.json({ token, user: { id: user.id, name: user.name, email: user.email, height: user.height, weight: user.weight, gender: user.gender } });
     } catch (error) {
         console.error("Registration Error:", error);
         res.status(500).json({ error: 'Error registering user' });
@@ -62,7 +63,7 @@ router.post('/login', async (req, res) => {
         if (!validPass) return res.status(401).json({ error: 'Wrong password' });
 
         const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
-        res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
+        res.json({ token, user: { id: user.id, name: user.name, email: user.email, height: user.height, weight: user.weight, gender: user.gender } });
     } catch (error) {
         res.status(500).json({ error: 'Error logging in' });
     }
@@ -169,6 +170,43 @@ router.post('/reset-password', async (req, res) => {
     } catch (error) {
         console.error("Reset Password Error:", error);
         res.status(500).json({ error: 'Error resetting password' });
+    }
+});
+
+// Get user profile
+router.get('/profile', authenticateToken, async (req: any, res) => {
+    try {
+        const user = await prisma.user.findUnique({
+            where: { id: req.user.id },
+            select: { id: true, name: true, email: true, height: true, weight: true, gender: true }
+        });
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        res.json(user);
+    } catch (error) {
+        console.error('Profile fetch error:', error);
+        res.status(500).json({ error: 'Error fetching profile' });
+    }
+});
+
+// Update user profile
+router.put('/profile', authenticateToken, async (req: any, res) => {
+    try {
+        const { name, height, weight, gender } = req.body;
+        const data: any = {};
+        if (name !== undefined) data.name = name;
+        if (height !== undefined) data.height = height ? parseFloat(height) : null;
+        if (weight !== undefined) data.weight = weight ? parseFloat(weight) : null;
+        if (gender !== undefined) data.gender = gender || null;
+
+        const user = await prisma.user.update({
+            where: { id: req.user.id },
+            data,
+            select: { id: true, name: true, email: true, height: true, weight: true, gender: true }
+        });
+        res.json(user);
+    } catch (error) {
+        console.error('Profile update error:', error);
+        res.status(500).json({ error: 'Error updating profile' });
     }
 });
 
