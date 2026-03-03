@@ -113,7 +113,7 @@ function buildUserProfile(workouts: any[]): string {
 // Used when OpenAI API is unavailable
 // ─────────────────────────────────────────────
 function generateOfflineResponse(query: string, workouts: any[]): string {
-    const lowerQuery = query.toLowerCase();
+    const lowerQuery = query.toLowerCase().trim();
 
     // Build basic context from workouts
     let personalContext = '';
@@ -124,7 +124,31 @@ function generateOfflineResponse(query: string, workouts: any[]): string {
         personalContext = ` Based on your data, your last workout was ${daysSinceLastWorkout} days ago and included ${exerciseNames}.`;
     }
 
-    // Muscle Groups & Exercises
+    // ── Conversational / Social responses ──
+    if (/^(thanks|thank you|thx|ty|appreciate|cheers)/i.test(lowerQuery))
+        return `You're welcome! 💪 Keep pushing and let me know if you need anything else. I'm here to help with your fitness journey!`;
+    if (/^(hi|hey|hello|sup|yo|what's up|howdy|good morning|good evening|good afternoon)/i.test(lowerQuery))
+        return `Hey there! 👋 Ready to crush it? Ask me about workout plans, specific exercises, nutrition, or your progress!${personalContext}`;
+    if (/^(bye|goodbye|see you|later|gotta go|cya)/i.test(lowerQuery))
+        return `See you next time! 🏋️ Stay consistent and keep logging your workouts. You've got this!`;
+    if (/^(ok|okay|got it|understood|cool|nice|great|awesome|perfect|alright)/i.test(lowerQuery))
+        return `Glad to help! Feel free to ask me anything else — whether it's about exercises, nutrition, recovery, or your workout plan. 💪`;
+    if (/^(help|what can you do|how does this work)/i.test(lowerQuery))
+        return `I'm your AI fitness coach! You can ask me about:\n• Workout plans for specific muscle groups\n• Exercise form and technique\n• Rest and recovery advice\n• What to train today\n• Nutrition basics\nJust type your question and I'll do my best to help! 🏋️`;
+    if (/^(how are you|how're you|how do you do)/i.test(lowerQuery))
+        return `I'm great, thanks for asking! 😊 I'm always here and ready to help you with your fitness goals. What can I help you with today?`;
+    if (lowerQuery.includes('lol') || lowerQuery.includes('haha') || lowerQuery.includes('😂'))
+        return `Haha glad I could make you smile! 😄 Anything else you'd like to know about your workouts or fitness?`;
+
+    // ── Nutrition ──
+    if (lowerQuery.includes('protein') || lowerQuery.includes('diet') || lowerQuery.includes('nutrition') || lowerQuery.includes('eat') || lowerQuery.includes('food') || lowerQuery.includes('meal'))
+        return `For muscle growth, aim for 1.6-2.2g of protein per kg body weight daily. Eat balanced meals with lean proteins, complex carbs, and healthy fats. Stay hydrated!${personalContext}`;
+    if (lowerQuery.includes('water') || lowerQuery.includes('hydrat'))
+        return `Stay hydrated! Aim for at least 2-3 liters of water daily, more on workout days. Dehydration can significantly impact your performance. 💧`;
+    if (lowerQuery.includes('supplement') || lowerQuery.includes('creatine') || lowerQuery.includes('whey'))
+        return `Key evidence-based supplements: Creatine monohydrate (5g/day), whey protein for convenience, and Vitamin D if deficient. Focus on whole foods first!`;
+
+    // ── Muscle Groups & Exercises ──
     if (lowerQuery.includes('chest') || lowerQuery.includes('bench') || lowerQuery.includes('push up'))
         return `For chest development, focus on Bench Press, Incline Dumbbell Press, and Chest Flyes. Aim for 3-4 sets of 8-12 reps.${personalContext}`;
     if (lowerQuery.includes('back') || lowerQuery.includes('pull') || lowerQuery.includes('row'))
@@ -135,15 +159,29 @@ function generateOfflineResponse(query: string, workouts: any[]): string {
         return `For arms, try supersetting Bicep Curls with Tricep Extensions for maximum pump.${personalContext}`;
     if (lowerQuery.includes('shoulder') || lowerQuery.includes('delts'))
         return `Target all three heads: Overhead Press for mass, Lateral Raises for width, Face Pulls for rear delts.${personalContext}`;
+    if (lowerQuery.includes('core') || lowerQuery.includes('abs') || lowerQuery.includes('plank'))
+        return `For a strong core, combine Planks, Hanging Leg Raises, and Cable Crunches. Train abs 2-3x per week with progressive overload.${personalContext}`;
 
-    // Training advice
+    // ── Training advice ──
     if (lowerQuery.includes('today') || lowerQuery.includes('what should'))
         return `I'd suggest focusing on progressive overload — try adding 2.5kg or 1-2 extra reps to your main lifts.${personalContext}`;
     if (lowerQuery.includes('rest') || lowerQuery.includes('recover') || lowerQuery.includes('sleep'))
         return `Muscles grow while you rest. Aim for 7-9 hours of sleep and 1-2 rest days per week.${personalContext}`;
+    if (lowerQuery.includes('warm') || lowerQuery.includes('stretch'))
+        return `Always warm up! 5-10 min of light cardio, then dynamic stretches. Save static stretching for after your workout. This prevents injuries and improves performance.`;
+    if (lowerQuery.includes('beginner') || lowerQuery.includes('start') || lowerQuery.includes('new'))
+        return `Welcome! Start with compound movements: Squats, Bench Press, Deadlifts, Rows, and Overhead Press. Begin light, focus on form, and gradually increase weight each week. 3 full-body sessions per week is great for beginners!${personalContext}`;
+    if (lowerQuery.includes('split') || lowerQuery.includes('routine') || lowerQuery.includes('program') || lowerQuery.includes('plan'))
+        return `Popular splits:\n• Push/Pull/Legs (6 days) — great for intermediate+\n• Upper/Lower (4 days) — good balance\n• Full Body (3 days) — perfect for beginners\nPick one that fits your schedule and stick with it consistently!${personalContext}`;
+    if (lowerQuery.includes('cardio') || lowerQuery.includes('running') || lowerQuery.includes('hiit'))
+        return `Mix both LISS (walking, light jogging) and HIIT. 2-3 cardio sessions per week won't hurt your gains. Do cardio after lifting or on separate days.${personalContext}`;
+    if (lowerQuery.includes('weight loss') || lowerQuery.includes('lose weight') || lowerQuery.includes('fat') || lowerQuery.includes('cut'))
+        return `Fat loss = caloric deficit + strength training + adequate protein. Aim for a 300-500 calorie deficit, keep protein high (2g/kg), and lift heavy to preserve muscle.${personalContext}`;
+    if (lowerQuery.includes('muscle') || lowerQuery.includes('bulk') || lowerQuery.includes('gain') || lowerQuery.includes('grow'))
+        return `For muscle growth: caloric surplus (200-300 cal above maintenance), high protein (1.8-2.2g/kg), progressive overload, and 7-9 hours of sleep. Consistency is king! 👑${personalContext}`;
 
-    // Fallback
-    return `Great question! Focus on the fundamentals: progressive overload, consistency, and proper form. Try asking about a specific muscle group or exercise!${personalContext}`;
+    // ── Fallback ──
+    return `That's a great topic! I can help you with workout plans, exercise form, nutrition advice, and tracking your progress. Try asking about a specific muscle group, workout split, or fitness goal!${personalContext}`;
 }
 
 // ═════════════════════════════════════════════

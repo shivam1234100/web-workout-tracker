@@ -5,7 +5,7 @@ import { API_URL } from '../constants/api';
 import { Send, Bot, User, Plus, Trash2, MessageSquare } from 'lucide-react';
 
 function generateOfflineResponse(query, workoutHistory) {
-    const lq = query.toLowerCase();
+    const lq = query.toLowerCase().trim();
     let ctx = '';
     if (workoutHistory.length > 0) {
         const last = workoutHistory[0];
@@ -13,13 +13,22 @@ function generateOfflineResponse(query, workoutHistory) {
         const days = Math.floor((Date.now() - new Date(last.endTime || last.date).getTime()) / 86400000);
         ctx = ` Your last workout was ${days}d ago (${names}).`;
     }
+    // Conversational
+    if (/^(thanks|thank you|thx|ty|appreciate|cheers)/i.test(lq)) return `You're welcome! 💪 Keep pushing and let me know if you need anything else!`;
+    if (/^(hi|hey|hello|sup|yo|what's up|howdy|good morning|good evening)/i.test(lq)) return `Hey there! 👋 Ready to crush it? Ask me about workouts, nutrition, or your progress!${ctx}`;
+    if (/^(bye|goodbye|see you|later|cya)/i.test(lq)) return `See you next time! 🏋️ Stay consistent and keep logging your workouts!`;
+    if (/^(ok|okay|got it|cool|nice|great|awesome|perfect|alright)/i.test(lq)) return `Glad to help! Feel free to ask anything else about fitness. 💪`;
+    if (/^(how are you|how're you)/i.test(lq)) return `I'm great, thanks! 😊 What can I help you with today?`;
+    // Fitness
     if (lq.includes('chest') || lq.includes('bench')) return `Bench Press, Incline DB Press, Flyes — 3-4×8-12.${ctx}`;
     if (lq.includes('back') || lq.includes('pull')) return `Pull-ups, Rows, Lat Pulldowns. Squeeze shoulder blades!${ctx}`;
     if (lq.includes('leg') || lq.includes('squat')) return `Squats, Lunges, RDLs. Drive through heels.${ctx}`;
     if (lq.includes('shoulder')) return `OHP for mass, Lateral Raises for width, Face Pulls for rear.${ctx}`;
     if (lq.includes('arm') || lq.includes('bicep')) return `Superset Curls with Tricep Extensions.${ctx}`;
     if (lq.includes('today') || lq.includes('what should')) return `Try adding 2.5kg or 1-2 extra reps to your main lifts.${ctx}`;
-    return `Focus on progressive overload, consistency, and form!${ctx}`;
+    if (lq.includes('protein') || lq.includes('diet') || lq.includes('eat')) return `Aim for 1.6-2.2g protein per kg body weight daily. Balanced meals with lean proteins, complex carbs, and healthy fats.${ctx}`;
+    if (lq.includes('rest') || lq.includes('sleep') || lq.includes('recover')) return `Muscles grow while you rest. Aim for 7-9 hours of sleep and 1-2 rest days per week.${ctx}`;
+    return `I can help with workout plans, nutrition, and tracking your progress. Try asking about a specific muscle group or fitness goal!${ctx}`;
 }
 
 function groupIntoConversations(messages) {
