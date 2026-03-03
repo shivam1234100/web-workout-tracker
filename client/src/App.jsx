@@ -1,7 +1,8 @@
-import { BrowserRouter, Routes, Route, Navigate, NavLink, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { WorkoutProvider } from './context/WorkoutContext';
-import { Home, Dumbbell, History, Bot, TrendingUp, User, LogOut, Library } from 'lucide-react';
+import { Home, Dumbbell, History, Bot, TrendingUp, User, LogOut, Library, Menu, X } from 'lucide-react';
 
 import LoginPage from './pages/LoginPage';
 import SignupPage from './pages/SignupPage';
@@ -20,54 +21,109 @@ function ProtectedRoute({ children }) {
     return isAuthenticated ? children : <Navigate to="/login" />;
 }
 
-function Sidebar() {
+function Sidebar({ mobileOpen, onClose }) {
     const { signOut, user } = useAuth();
     const navigate = useNavigate();
-    const handleLogout = () => { signOut(); navigate('/login'); };
+    const handleLogout = () => { signOut(); navigate('/login'); onClose?.(); };
+    const handleNavClick = () => { onClose?.(); };
 
     return (
-        <aside className="sidebar">
-            <div className="sidebar-logo">
-                <div className="logo-icon">🏋️</div>
+        <>
+            {mobileOpen && <div className="sidebar-overlay" onClick={onClose} />}
+            <aside className={`sidebar ${mobileOpen ? 'sidebar-mobile-open' : ''}`}>
+                <div className="sidebar-logo">
+                    <div className="logo-icon">🏋️</div>
+                    <h1>AI Workout</h1>
+                    {mobileOpen && (
+                        <button className="btn-icon sidebar-close-btn" onClick={onClose}>
+                            <X size={20} />
+                        </button>
+                    )}
+                </div>
+                <nav className="sidebar-nav">
+                    <NavLink to="/dashboard" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`} onClick={handleNavClick}>
+                        <Home size={20} /> Dashboard
+                    </NavLink>
+                    <NavLink to="/workout" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`} onClick={handleNavClick}>
+                        <Dumbbell size={20} /> Workout
+                    </NavLink>
+                    <NavLink to="/exercises" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`} onClick={handleNavClick}>
+                        <Library size={20} /> Exercises
+                    </NavLink>
+                    <NavLink to="/history" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`} onClick={handleNavClick}>
+                        <History size={20} /> History
+                    </NavLink>
+                    <NavLink to="/ai-coach" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`} onClick={handleNavClick}>
+                        <Bot size={20} /> AI Coach
+                    </NavLink>
+                    <NavLink to="/weekly-summary" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`} onClick={handleNavClick}>
+                        <TrendingUp size={20} /> Weekly Insights
+                    </NavLink>
+                    <NavLink to="/profile" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`} onClick={handleNavClick}>
+                        <User size={20} /> Profile
+                    </NavLink>
+                </nav>
+                <div className="sidebar-footer">
+                    <button className="nav-link" onClick={handleLogout} style={{ color: 'var(--accent-red)' }}>
+                        <LogOut size={20} /> Log Out
+                    </button>
+                </div>
+            </aside>
+        </>
+    );
+}
+
+function MobileBottomNav() {
+    const location = useLocation();
+    const path = location.pathname;
+
+    const navItems = [
+        { to: '/dashboard', icon: Home, label: 'Home' },
+        { to: '/workout', icon: Dumbbell, label: 'Workout' },
+        { to: '/exercises', icon: Library, label: 'Exercises' },
+        { to: '/history', icon: History, label: 'History' },
+        { to: '/ai-coach', icon: Bot, label: 'AI' },
+        { to: '/profile', icon: User, label: 'Profile' },
+    ];
+
+    return (
+        <nav className="mobile-bottom-nav">
+            {navItems.map(item => (
+                <NavLink
+                    key={item.to}
+                    to={item.to}
+                    className={`mobile-nav-item ${path === item.to ? 'active' : ''}`}
+                >
+                    <item.icon size={20} />
+                    <span>{item.label}</span>
+                </NavLink>
+            ))}
+        </nav>
+    );
+}
+
+function MobileHeader({ onMenuOpen }) {
+    return (
+        <div className="mobile-header">
+            <div className="mobile-header-logo">
+                <div className="logo-icon" style={{ width: 32, height: 32, fontSize: 16, borderRadius: 8 }}>🏋️</div>
                 <h1>AI Workout</h1>
             </div>
-            <nav className="sidebar-nav">
-                <NavLink to="/dashboard" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-                    <Home size={20} /> Dashboard
-                </NavLink>
-                <NavLink to="/workout" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-                    <Dumbbell size={20} /> Workout
-                </NavLink>
-                <NavLink to="/exercises" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-                    <Library size={20} /> Exercises
-                </NavLink>
-                <NavLink to="/history" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-                    <History size={20} /> History
-                </NavLink>
-                <NavLink to="/ai-coach" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-                    <Bot size={20} /> AI Coach
-                </NavLink>
-                <NavLink to="/weekly-summary" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-                    <TrendingUp size={20} /> Weekly Insights
-                </NavLink>
-                <NavLink to="/profile" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-                    <User size={20} /> Profile
-                </NavLink>
-            </nav>
-            <div className="sidebar-footer">
-                <button className="nav-link" onClick={handleLogout} style={{ color: 'var(--accent-red)' }}>
-                    <LogOut size={20} /> Log Out
-                </button>
-            </div>
-        </aside>
+            <button className="btn-icon" onClick={onMenuOpen}>
+                <Menu size={20} />
+            </button>
+        </div>
     );
 }
 
 function AppLayout() {
+    const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
     return (
         <WorkoutProvider>
             <div className="app-layout">
-                <Sidebar />
+                <MobileHeader onMenuOpen={() => setMobileMenuOpen(true)} />
+                <Sidebar mobileOpen={mobileMenuOpen} onClose={() => setMobileMenuOpen(false)} />
                 <main className="main-content">
                     <Routes>
                         <Route path="/dashboard" element={<DashboardPage />} />
@@ -80,6 +136,7 @@ function AppLayout() {
                         <Route path="*" element={<Navigate to="/dashboard" />} />
                     </Routes>
                 </main>
+                <MobileBottomNav />
             </div>
         </WorkoutProvider>
     );
