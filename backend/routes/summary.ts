@@ -1,13 +1,11 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
-import OpenAI from 'openai';
 import { authenticateToken } from '../middleware/auth';
+import { aiEnabled, generateText } from '../lib/llm';
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
-const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 // ─────────────────────────────────────────────
 // HELPER: Compute weekly stats from workouts
@@ -137,7 +135,7 @@ router.post('/weekly', authenticateToken, async (req: any, res) => {
         let summaryText: string;
 
         try {
-            if (!openai) throw new Error('OPENAI_API_KEY not configured');
+            if (!aiEnabled()) throw new Error('GEMINI_API_KEY is not configured');
 
             // Generate AI summary
             const statsText = JSON.stringify(stats, null, 2);
@@ -149,16 +147,11 @@ router.post('/weekly', authenticateToken, async (req: any, res) => {
                 return `${new Date(w.date).toLocaleDateString()} — ${w.name}\n  ${exercises}`;
             }).join('\n\n');
 
-            const completion = await openai.chat.completions.create({
-                model: OPENAI_MODEL,
-                messages: [
-                    {
-                        role: 'system',
-                        content: `You are a professional fitness coach writing a concise weekly training summary for your client. Be encouraging, specific, and data-driven. Use emojis for visual appeal. Format with markdown. Keep it to 3-5 short paragraphs.`,
-                    },
-                    {
-                        role: 'user',
-                        content: `Generate a weekly training summary based on this data:
+            summaryText = await generateText(
+                `You are a professional fitness coach writing a concise weekly training summary for your client. Be encouraging, specific, and data-driven. Use emojis for visual appeal. Format with markdown. Keep it to 3-5 short paragraphs.`,
+                [{
+                    role: 'user',
+                    content: `Generate a weekly training summary based on this data:
 
 STATS:
 ${statsText}
@@ -171,13 +164,8 @@ Include:
 2. Highlights (best exercises, heaviest lifts)
 3. Areas for improvement or focus next week
 4. A motivational closing line`,
-                    },
-                ],
-                max_tokens: 500,
-                temperature: 0.7,
-            });
-
-            summaryText = completion.choices[0].message.content || generateOfflineSummary(stats);
+                }],
+            );
         } catch (aiError: any) {
             console.log('OpenAI API error for summary, using offline fallback:', aiError.message);
             summaryText = generateOfflineSummary(stats);

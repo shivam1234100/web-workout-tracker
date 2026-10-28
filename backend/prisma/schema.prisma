@@ -8,19 +8,20 @@ datasource db {
 }
 
 model User {
-  id               String    @id @default(auto()) @map("_id") @db.ObjectId
-  email            String    @unique
+  id               String          @id @default(auto()) @map("_id") @db.ObjectId
+  email            String          @unique
   password         String
   name             String
-  height           Float?    // in cm
-  weight           Float?    // in kg
-  gender           String?   // "male", "female", "other"
+  height           Float? // in cm
+  weight           Float? // in kg
+  gender           String? // "male", "female", "other"
   resetToken       String?
   resetTokenExpiry DateTime?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
   workouts         Workout[]
   chatMessages     ChatMessage[]
+  conversations    Conversation[]
   weeklySummaries  WeeklySummary[]
 }
 
@@ -38,20 +39,37 @@ model Workout {
 }
 
 model Exercise {
-  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  id        String  @id @default(auto()) @map("_id") @db.ObjectId
   name      String
-  workoutId String   @db.ObjectId
-  workout   Workout  @relation(fields: [workoutId], references: [id], onDelete: Cascade)
-  sets      String   // Storing sets as JSON string for simplicity
+  workoutId String  @db.ObjectId
+  workout   Workout @relation(fields: [workoutId], references: [id], onDelete: Cascade)
+  sets      String // Storing sets as JSON string for simplicity
+}
+
+model Conversation {
+  id        String        @id @default(auto()) @map("_id") @db.ObjectId
+  title     String
+  userId    String        @db.ObjectId
+  user      User          @relation(fields: [userId], references: [id])
+  messages  ChatMessage[]
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([userId, updatedAt])
 }
 
 model ChatMessage {
-  id        String   @id @default(auto()) @map("_id") @db.ObjectId
-  role      String   // "user" | "assistant" | "system"
-  content   String
-  userId    String   @db.ObjectId
-  user      User     @relation(fields: [userId], references: [id])
-  createdAt DateTime @default(now())
+  id             String        @id @default(auto()) @map("_id") @db.ObjectId
+  role           String // "user" | "assistant"
+  content        String
+  userId         String        @db.ObjectId
+  user           User          @relation(fields: [userId], references: [id])
+  conversationId String?       @db.ObjectId
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime      @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([userId, createdAt])
 }
 
 model WeeklySummary {
@@ -60,7 +78,7 @@ model WeeklySummary {
   user      User     @relation(fields: [userId], references: [id])
   weekStart DateTime
   weekEnd   DateTime
-  summary   String   // AI-generated markdown summary
-  stats     String   // JSON string with computed stats
+  summary   String // AI-generated markdown summary
+  stats     String // JSON string with computed stats
   createdAt DateTime @default(now())
 }

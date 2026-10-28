@@ -1,139 +1,236 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { useWorkout } from '../context/WorkoutContext';
 import { API_URL } from '../constants/api';
 import FormattedText from '../components/FormattedText';
-import { Send, Bot, User, Plus, Trash2, MessageSquare } from 'lucide-react';
+import { Send, Bot, User, Plus, Trash2, MessageSquare, Square, X, PanelLeft } from 'lucide-react';
 
-function generateOfflineResponse(query, workoutHistory) {
-    const lq = query.toLowerCase().trim();
-    let ctx = '';
-    if (workoutHistory.length > 0) {
-        const last = workoutHistory[0];
-        const names = last.exercises?.map(e => e.name).join(', ') || 'exercises';
-        const days = Math.floor((Date.now() - new Date(last.endTime || last.date).getTime()) / 86400000);
-        ctx = ` Your last workout was ${days === 0 ? 'today' : `${days}d ago`} (${names}).`;
+const QUICK_PROMPTS = [
+    'What should I train today?',
+    'How do I improve my bench press?',
+    'Build me a 4-day upper/lower split',
+    'My knee hurts on leg day. What can I do instead?',
+];
+
+// Reads the Server-Sent Events stream from POST /ai/chat and calls onEvent(event, data) for each one
+async function streamCoachReply({ token, body, signal, onEvent }) {
+    const res = await fetch(`${API_URL}/ai/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+        signal,
+    });
+    if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'The coach is unavailable right now. Please try again.');
     }
-    // Conversational
-    if (/^(thanks|thank you|thx|ty|appreciate|cheers)/i.test(lq)) return `You're welcome! 💪 Keep pushing and let me know if you need anything else!`;
-    if (/^(hi|hey|hello|sup|yo|what's up|howdy|good morning|good evening)/i.test(lq)) return `Hey there! 👋 Ready to crush it? Ask me about workouts, nutrition, or your progress!${ctx}`;
-    if (/^(bye|goodbye|see you|later|cya)/i.test(lq)) return `See you next time! 🏋️ Stay consistent and keep logging your workouts!`;
-    if (/^(ok|okay|got it|cool|nice|great|awesome|perfect|alright)/i.test(lq)) return `Glad to help! Feel free to ask anything else about fitness. 💪`;
-    if (/^(how are you|how're you)/i.test(lq)) return `I'm great, thanks! 😊 What can I help you with today?`;
-    // Fitness
-    if (lq.includes('chest') || lq.includes('bench')) return `Bench Press, Incline DB Press, Flyes — 3-4×8-12.${ctx}`;
-    if (lq.includes('back') || lq.includes('pull')) return `Pull-ups, Rows, Lat Pulldowns. Squeeze shoulder blades!${ctx}`;
-    if (lq.includes('leg') || lq.includes('squat')) return `Squats, Lunges, RDLs. Drive through heels.${ctx}`;
-    if (lq.includes('shoulder')) return `OHP for mass, Lateral Raises for width, Face Pulls for rear.${ctx}`;
-    if (lq.includes('arm') || lq.includes('bicep')) return `Superset Curls with Tricep Extensions.${ctx}`;
-    if (lq.includes('today') || lq.includes('what should')) return `Try adding 2.5kg or 1-2 extra reps to your main lifts.${ctx}`;
-    if (lq.includes('protein') || lq.includes('diet') || lq.includes('eat')) return `Aim for 1.6-2.2g protein per kg body weight daily. Balanced meals with lean proteins, complex carbs, and healthy fats.${ctx}`;
-    if (lq.includes('rest') || lq.includes('sleep') || lq.includes('recover')) return `Muscles grow while you rest. Aim for 7-9 hours of sleep and 1-2 rest days per week.${ctx}`;
-    return `I can help with workout plans, nutrition, and tracking your progress. Try asking about a specific muscle group or fitness goal!${ctx}`;
-}
 
-function groupIntoConversations(messages) {
-    if (messages.length === 0) return [];
-    const convos = [];
-    let cur = [messages[0]];
-    for (let i = 1; i < messages.length; i++) {
-        const prevT = messages[i - 1].createdAt ? new Date(messages[i - 1].createdAt).getTime() : 0;
-        const curT = messages[i].createdAt ? new Date(messages[i].createdAt).getTime() : 0;
-        if (curT - prevT > 30 * 60 * 1000) { convos.push(buildConvo(cur)); cur = [messages[i]]; }
-        else cur.push(messages[i]);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let boundary;
+        while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+            const raw = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            let event = 'message';
+            let data = '';
+            for (const line of raw.split('\n')) {
+                if (line.startsWith('event:')) event = line.slice(6).trim();
+                else if (line.startsWith('data:')) data += line.slice(5).trim();
+            }
+            if (data) onEvent(event, JSON.parse(data));
+        }
     }
-    if (cur.length > 0) convos.push(buildConvo(cur));
-    return convos.reverse();
 }
 
-function buildConvo(msgs) {
-    const firstUser = msgs.find(m => m.role === 'user');
-    const title = firstUser ? (firstUser.content.length > 40 ? firstUser.content.substring(0, 40) + '...' : firstUser.content) : 'New conversation';
-    const last = msgs[msgs.length - 1];
-    const preview = last.role === 'assistant' ? (last.content.length > 60 ? last.content.substring(0, 60) + '...' : last.content) : '';
-    const diff = msgs[0].createdAt ? Math.floor((Date.now() - new Date(msgs[0].createdAt).getTime()) / 86400000) : 0;
-    const date = diff === 0 ? 'Today' : diff === 1 ? 'Yesterday' : new Date(msgs[0].createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    return { id: msgs[0].id, title, preview, date, messages: msgs };
-}
+const formatConvoDate = (iso) => {
+    const date = new Date(iso);
+    const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const days = Math.round((startOfDay(new Date()) - startOfDay(date)) / 86400000);
+    if (days === 0) return 'Today';
+    if (days === 1) return 'Yesterday';
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+};
 
 export default function AICoachPage() {
-    const [input, setInput] = useState('');
-    const [isLoading, setIsLoading] = useState(false);
-    const [isLoadingHistory, setIsLoadingHistory] = useState(true);
-    const [allMessages, setAllMessages] = useState([]);
-    const [activeMessages, setActiveMessages] = useState([]);
-    const [activeConvoId, setActiveConvoId] = useState(null);
-    const [activeConvoTitle, setActiveConvoTitle] = useState('New Chat');
-    const scrollRef = useRef(null);
     const { token } = useAuth();
-    const { history: workoutHistory } = useWorkout();
+    const [conversations, setConversations] = useState([]);
+    const [loadingList, setLoadingList] = useState(true);
+    const [activeId, setActiveId] = useState(null);
+    const [activeTitle, setActiveTitle] = useState('New Chat');
+    const [messages, setMessages] = useState([]);
+    const [loadingMessages, setLoadingMessages] = useState(false);
+    const [input, setInput] = useState('');
+    const [streaming, setStreaming] = useState(false);
+    const [error, setError] = useState('');
+    const [showList, setShowList] = useState(false);
+    const [confirmClear, setConfirmClear] = useState(false);
+    const abortRef = useRef(null);
+    const scrollRef = useRef(null);
+    const inputRef = useRef(null);
 
-    useEffect(() => { loadHistory(); }, []);
-    useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }); }, [activeMessages]);
+    const authHeaders = { Authorization: `Bearer ${token}` };
 
-    const loadHistory = async () => {
-        setIsLoadingHistory(true);
-        if (!token) { setIsLoadingHistory(false); return; }
+    const loadConversations = useCallback(async () => {
         try {
-            const res = await fetch(`${API_URL}/ai/history`, { headers: { Authorization: `Bearer ${token}` } });
-            if (res.ok) {
-                const data = await res.json();
-                setAllMessages(data.map(m => ({ id: m.id, role: m.role, content: m.content, createdAt: m.createdAt })));
-            }
+            const res = await fetch(`${API_URL}/ai/conversations`, { headers: { Authorization: `Bearer ${token}` } });
+            if (res.ok) setConversations(await res.json());
         } catch { }
-        finally { setIsLoadingHistory(false); }
+        finally { setLoadingList(false); }
+    }, [token]);
+
+    useEffect(() => { loadConversations(); }, [loadConversations]);
+    useEffect(() => () => abortRef.current?.abort(), []);
+    useEffect(() => {
+        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: streaming ? 'auto' : 'smooth' });
+    }, [messages, streaming]);
+
+    // Grow the textarea with its content, up to a limit
+    useEffect(() => {
+        const el = inputRef.current;
+        if (!el) return;
+        el.style.height = 'auto';
+        const border = el.offsetHeight - el.clientHeight;
+        const full = el.scrollHeight + border;
+        el.style.height = `${Math.min(full, 160)}px`;
+        el.style.overflowY = full > 160 ? 'auto' : 'hidden';
+    }, [input]);
+
+    const openConversation = async (convo) => {
+        if (streaming) return;
+        setShowList(false);
+        setError('');
+        setActiveId(convo.id);
+        setActiveTitle(convo.title);
+        setMessages([]);
+        setLoadingMessages(true);
+        try {
+            const res = await fetch(`${API_URL}/ai/conversations/${convo.id}/messages`, { headers: authHeaders });
+            if (!res.ok) throw new Error();
+            const data = await res.json();
+            setMessages(data.messages);
+        } catch {
+            setError('Could not load this chat. Please try again.');
+        } finally {
+            setLoadingMessages(false);
+        }
     };
-
-    const conversations = groupIntoConversations(allMessages);
-
-    const openConvo = (convo) => { setActiveMessages(convo.messages); setActiveConvoId(convo.id); setActiveConvoTitle(convo.title); };
 
     const newChat = () => {
-        const welcome = { id: 'welcome', role: 'assistant', content: "👋 Hey! I'm your AI Coach. Ask me anything about training, nutrition, or your progress!", createdAt: new Date().toISOString() };
-        setActiveMessages([welcome]); setActiveConvoId(null); setActiveConvoTitle('New Chat');
+        if (streaming) return;
+        setShowList(false);
+        setError('');
+        setActiveId(null);
+        setActiveTitle('New Chat');
+        setMessages([]);
+        inputRef.current?.focus();
     };
 
-    const sendMessage = async () => {
-        if (!input.trim() || isLoading) return;
-        if (activeMessages.length === 0) newChat();
-        const userMsg = { id: Date.now().toString(), role: 'user', content: input.trim(), createdAt: new Date().toISOString() };
-        if (!activeMessages.some(m => m.role === 'user')) setActiveConvoTitle(userMsg.content.length > 40 ? userMsg.content.substring(0, 40) + '...' : userMsg.content);
-        setActiveMessages(p => [...p, userMsg]); setAllMessages(p => [...p, userMsg]); setInput(''); setIsLoading(true);
+    const sendMessage = async (text) => {
+        const content = (text ?? input).trim();
+        if (!content || streaming) return;
+
+        const userMsg = { id: `local-${Date.now()}`, role: 'user', content, createdAt: new Date().toISOString() };
+        const replyId = `reply-${Date.now()}`;
+        setMessages(prev => [...prev, userMsg, { id: replyId, role: 'assistant', content: '', pending: true }]);
+        setInput('');
+        setError('');
+        setStreaming(true);
+
+        const controller = new AbortController();
+        abortRef.current = controller;
+        let saved = false; // true once the server has stored the user's message
+        const updateReply = (fn) => setMessages(prev => prev.map(m => (m.id === replyId ? fn(m) : m)));
+
         try {
-            const res = await fetch(`${API_URL}/ai/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ message: userMsg.content }) });
-            if (res.ok) {
-                const data = await res.json();
-                const aiMsg = { id: (Date.now() + 1).toString(), role: 'assistant', content: data.response, createdAt: new Date().toISOString() };
-                setActiveMessages(p => [...p, aiMsg]); setAllMessages(p => [...p, aiMsg]);
-            } else throw new Error();
+            await streamCoachReply({
+                token,
+                body: { message: content, conversationId: activeId || undefined, tzOffset: new Date().getTimezoneOffset() },
+                signal: controller.signal,
+                onEvent: (event, data) => {
+                    if (event === 'meta') {
+                        saved = true;
+                        setActiveId(data.conversationId);
+                        if (!activeId) setActiveTitle(data.title);
+                    } else if (event === 'delta') {
+                        updateReply(m => ({ ...m, content: m.content + data.text }));
+                    } else if (event === 'done') {
+                        updateReply(m => ({ ...m, id: data.messageId, pending: false, offline: data.offline, createdAt: new Date().toISOString() }));
+                    } else if (event === 'error') {
+                        throw new Error(data.error);
+                    }
+                },
+            });
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                updateReply(m => ({ ...m, pending: false, stopped: true }));
+            } else if (!saved) {
+                // Nothing reached the server: put the text back so it can be resent
+                setMessages(prev => prev.filter(m => m.id !== replyId && m.id !== userMsg.id));
+                setInput(content);
+                setError(err.message || 'Could not reach the coach. Please try again.');
+            } else {
+                updateReply(m => ({ ...m, pending: false }));
+                setError('The reply was interrupted. Please try again.');
+            }
+        } finally {
+            setMessages(prev => prev.filter(m => !(m.id === replyId && !m.content)));
+            setStreaming(false);
+            abortRef.current = null;
+            loadConversations();
+        }
+    };
+
+    const stopReply = () => abortRef.current?.abort();
+
+    const deleteConversation = async (e, convo) => {
+        e.stopPropagation();
+        try {
+            const res = await fetch(`${API_URL}/ai/conversations/${convo.id}`, { method: 'DELETE', headers: authHeaders });
+            if (!res.ok && res.status !== 404) throw new Error();
+            setConversations(prev => prev.filter(c => c.id !== convo.id));
+            if (convo.id === activeId) newChat();
         } catch {
-            setTimeout(() => {
-                const fb = { id: (Date.now() + 1).toString(), role: 'assistant', content: generateOfflineResponse(userMsg.content, workoutHistory), createdAt: new Date().toISOString() };
-                setActiveMessages(p => [...p, fb]); setAllMessages(p => [...p, fb]);
-            }, 800);
-        } finally { setIsLoading(false); }
+            setError('Could not delete that chat. Please try again.');
+        }
     };
 
     const clearAll = async () => {
-        try { await fetch(`${API_URL}/ai/history`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }); } catch { }
-        setAllMessages([]); setActiveMessages([]); setActiveConvoId(null);
+        setConfirmClear(false);
+        try {
+            const res = await fetch(`${API_URL}/ai/history`, { method: 'DELETE', headers: authHeaders });
+            if (!res.ok) throw new Error();
+            setConversations([]);
+            newChat();
+        } catch {
+            setError('Could not clear your chats. Please try again.');
+        }
     };
 
-    const handleKeyDown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } };
+    const handleKeyDown = (e) => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            sendMessage();
+        }
+    };
 
     return (
         <div className="chat-layout">
-            {/* Sidebar */}
-            <div className="chat-sidebar">
+            {/* Conversation list (an overlay on phones) */}
+            <div className={`chat-sidebar ${showList ? 'open' : ''}`}>
                 <div className="chat-sidebar-header">
                     <h3 style={{ fontSize: 16, fontWeight: 700 }}>Chats</h3>
                     <div className="flex gap-8">
-                        <button className="btn-icon" onClick={newChat} title="New Chat"><Plus size={18} /></button>
-                        <button className="btn-icon" onClick={clearAll} title="Clear All" style={{ color: 'var(--accent-red)' }}><Trash2 size={16} /></button>
+                        <button className="btn-icon" onClick={newChat} title="New chat" aria-label="New chat" disabled={streaming}><Plus size={18} /></button>
+                        <button className="btn-icon" onClick={() => setConfirmClear(true)} title="Delete all chats" aria-label="Delete all chats" style={{ color: 'var(--accent-red)' }} disabled={conversations.length === 0}><Trash2 size={16} /></button>
+                        <button className="btn-icon chat-list-close" onClick={() => setShowList(false)} aria-label="Close chats"><X size={18} /></button>
                     </div>
                 </div>
                 <div className="chat-sidebar-list">
-                    {isLoadingHistory ? (
+                    {loadingList ? (
                         <div style={{ padding: 30, display: 'flex', justifyContent: 'center' }}><div className="spinner" /></div>
                     ) : conversations.length === 0 ? (
                         <div style={{ padding: 30, textAlign: 'center' }}>
@@ -142,65 +239,109 @@ export default function AICoachPage() {
                         </div>
                     ) : (
                         conversations.map(c => (
-                            <div key={c.id} className={`chat-convo-item ${activeConvoId === c.id ? 'active' : ''}`} onClick={() => openConvo(c)}>
+                            <div key={c.id} className={`chat-convo-item ${activeId === c.id ? 'active' : ''}`} onClick={() => openConversation(c)}>
                                 <div className="convo-title">{c.title}</div>
                                 {c.preview && <div className="convo-preview">{c.preview}</div>}
-                                <div className="convo-date">{c.date}</div>
+                                <div className="convo-date">{formatConvoDate(c.updatedAt)}</div>
+                                <button className="convo-delete" onClick={(e) => deleteConversation(e, c)} title="Delete chat" aria-label={`Delete chat ${c.title}`}>
+                                    <Trash2 size={14} />
+                                </button>
                             </div>
                         ))
                     )}
                 </div>
             </div>
 
-            {/* Chat Main */}
+            {/* Chat */}
             <div className="chat-main">
-                <div className="chat-header"><h3>{activeConvoTitle}</h3></div>
+                <div className="chat-header">
+                    <button className="btn-icon chat-list-toggle" onClick={() => setShowList(true)} aria-label="Show chats"><PanelLeft size={18} /></button>
+                    <h3>{activeTitle}</h3>
+                    <button className="btn-icon chat-list-toggle" onClick={newChat} aria-label="New chat" disabled={streaming}><Plus size={18} /></button>
+                </div>
 
-                {activeMessages.length === 0 ? (
+                {loadingMessages ? (
+                    <div className="chat-empty-state"><div className="spinner" /></div>
+                ) : messages.length === 0 ? (
                     <div className="chat-empty-state">
                         <div style={{ width: 64, height: 64, borderRadius: '50%', background: 'var(--accent-blue-glow)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                             <Bot size={32} color="var(--accent-blue)" />
                         </div>
                         <h3>What can I help with?</h3>
-                        <p>Ask about workouts, nutrition, or your progress</p>
+                        <p>I know your workouts, your stats and our past chats.</p>
                         <div className="quick-prompts">
-                            {['What should I train today?', 'How do I improve my bench press?', 'Give me a push/pull/legs split'].map((p, i) => (
-                                <button key={i} className="quick-prompt" onClick={() => setInput(p)}>{p}</button>
+                            {QUICK_PROMPTS.map(p => (
+                                <button key={p} className="quick-prompt" onClick={() => sendMessage(p)}>{p}</button>
                             ))}
                         </div>
                     </div>
                 ) : (
                     <div className="chat-messages" ref={scrollRef}>
-                        {activeMessages.map(msg => (
+                        {messages.map(msg => (
                             <div key={msg.id} className={`chat-bubble ${msg.role}`}>
                                 <div className="avatar">
                                     {msg.role === 'assistant' ? <Bot size={16} /> : <User size={16} />}
                                 </div>
-                                <div>
-                                    <div className="message-content"><FormattedText text={msg.content} /></div>
-                                    {msg.createdAt && msg.id !== 'welcome' && (
+                                <div style={{ minWidth: 0 }}>
+                                    <div className="message-content">
+                                        {msg.pending && !msg.content ? (
+                                            <span className="typing-dots" aria-label="Coach is typing"><span /><span /><span /></span>
+                                        ) : msg.role === 'assistant' ? (
+                                            <>
+                                                <FormattedText text={msg.content} />
+                                                {msg.pending && <span className="stream-cursor" />}
+                                            </>
+                                        ) : msg.content}
+                                    </div>
+                                    {msg.offline && <div className="message-note">Offline coach: the AI service wasn't available for this reply.</div>}
+                                    {msg.stopped && <div className="message-note">Stopped</div>}
+                                    {msg.createdAt && !msg.pending && (
                                         <div className="message-time">{new Date(msg.createdAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</div>
                                     )}
                                 </div>
                             </div>
                         ))}
-                        {isLoading && (
-                            <div className="chat-bubble assistant">
-                                <div className="avatar"><Bot size={16} /></div>
-                                <div className="message-content"><div className="spinner" style={{ width: 18, height: 18, borderWidth: 2 }} /></div>
-                            </div>
-                        )}
                     </div>
                 )}
 
+                {error && <div className="alert alert-error chat-error">{error}</div>}
+
                 {/* Input */}
                 <div className="chat-input-area">
-                    <input placeholder="Message AI Coach..." value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown} />
-                    <button className={`chat-send-btn ${input.trim() ? 'active' : 'inactive'}`} onClick={sendMessage} disabled={!input.trim() || isLoading}>
-                        <Send size={20} />
-                    </button>
+                    <textarea
+                        ref={inputRef}
+                        rows={1}
+                        placeholder="Message AI Coach..."
+                        value={input}
+                        onChange={e => setInput(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        maxLength={4000}
+                    />
+                    {streaming ? (
+                        <button className="chat-send-btn active" onClick={stopReply} title="Stop" aria-label="Stop generating">
+                            <Square size={16} fill="currentColor" />
+                        </button>
+                    ) : (
+                        <button className={`chat-send-btn ${input.trim() ? 'active' : 'inactive'}`} onClick={() => sendMessage()} disabled={!input.trim()} aria-label="Send message">
+                            <Send size={20} />
+                        </button>
+                    )}
                 </div>
             </div>
+
+            {/* Delete-all confirmation */}
+            {confirmClear && (
+                <div className="modal-overlay" onClick={() => setConfirmClear(false)}>
+                    <div className="modal" onClick={e => e.stopPropagation()}>
+                        <div className="modal-header"><h2>Delete all chats?</h2><button className="btn-icon" onClick={() => setConfirmClear(false)}><X size={18} /></button></div>
+                        <p style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>Every conversation with the coach will be deleted, and it will forget what you told it. This can't be undone.</p>
+                        <div className="confirm-actions">
+                            <button className="btn btn-secondary" onClick={() => setConfirmClear(false)}>Cancel</button>
+                            <button className="btn btn-danger" onClick={clearAll}>Delete All</button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

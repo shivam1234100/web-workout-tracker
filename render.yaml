@@ -17,9 +17,7 @@ services:
         generateValue: true
       - key: FRONTEND_URL
         value: https://web-workout-tracker.vercel.app
-      - key: OPENAI_MODEL
-        value: gpt-4o-mini
-      - key: OPENAI_API_KEY
+      - key: GEMINI_API_KEY
         sync: false
       - key: RESEND_API_KEY
         sync: false

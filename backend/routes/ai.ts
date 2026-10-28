@@ -1,317 +1,453 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
-import OpenAI from 'openai';
 import { authenticateToken } from '../middleware/auth';
+import { aiEnabled, streamChat, ChatTurn } from '../lib/llm';
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Initialize OpenAI only when a key is configured; otherwise the offline coach is used
-const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const MAX_MESSAGE_LENGTH = 4000;
+const HISTORY_MESSAGES = 30;   // messages from the current conversation sent to the model
+const PAST_CHAT_NOTES = 15;    // user messages from earlier conversations, used as long-term memory
+const WORKOUTS_IN_CONTEXT = 40;
+
+const isObjectId = (id: unknown): id is string => typeof id === 'string' && /^[a-f0-9]{24}$/i.test(id);
+
+const parseSets = (sets: unknown): any[] => {
+    if (Array.isArray(sets)) return sets;
+    if (typeof sets === 'string') { try { return JSON.parse(sets); } catch { return []; } }
+    return [];
+};
+
+const formatSet = (set: any) => {
+    const weight = Number(set.weight) || 0;
+    const reps = Number(set.reps) || 0;
+    return weight > 0 ? `${weight}kg×${reps}` : `${reps} reps`;
+};
 
 // ─────────────────────────────────────────────
-// HELPER: Build a user training profile from workout data
-// This is the "secret sauce" — converts raw DB data into
-// a structured text block that the LLM can reason about.
+// Dates in the user's timezone. tzOffset is the browser's Date#getTimezoneOffset() (e.g. -330 for IST).
 // ─────────────────────────────────────────────
-function buildUserProfile(workouts: any[]): string {
+const toLocal = (date: Date, tzOffset: number) => new Date(date.getTime() - tzOffset * 60000);
+const localDayNumber = (date: Date, tzOffset: number) => Math.floor(toLocal(date, tzOffset).getTime() / 86400000);
+const formatLocalDate = (date: Date, tzOffset: number, withYear = false) =>
+    toLocal(date, tzOffset).toLocaleDateString('en-US', {
+        weekday: 'short', month: 'short', day: 'numeric', ...(withYear ? { year: 'numeric' } : {}), timeZone: 'UTC',
+    });
+const daysAgoLabel = (date: Date, tzOffset: number) => {
+    const days = localDayNumber(new Date(), tzOffset) - localDayNumber(date, tzOffset);
+    return days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`;
+};
+
+// ─────────────────────────────────────────────
+// Turns the user's profile and workout log into a compact brief the model can reason about
+// ─────────────────────────────────────────────
+function buildTrainingBrief(user: any, workouts: any[], tzOffset: number): string {
+    const sections: string[] = [];
+    const now = new Date();
+
+    sections.push(`## Today\n${formatLocalDate(now, tzOffset, true)}`);
+
+    const profile: string[] = [`- Name: ${user?.name || 'unknown'}`];
+    if (user?.gender) profile.push(`- Gender: ${user.gender}`);
+    if (user?.height) profile.push(`- Height: ${user.height} cm`);
+    if (user?.weight) profile.push(`- Body weight: ${user.weight} kg`);
+    if (user?.height && user?.weight) profile.push(`- BMI: ${(user.weight / (user.height / 100) ** 2).toFixed(1)}`);
+    sections.push(`## Profile\n${profile.join('\n')}`);
+
     if (workouts.length === 0) {
-        return "This is a new user with no workout history yet. Give general beginner-friendly advice.";
+        sections.push('## Training log\nNo workouts logged yet. Treat them as a beginner unless they say otherwise, and encourage them to log their first workout in the app.');
+        return sections.join('\n\n');
     }
 
-    const totalWorkouts = workouts.length;
-    const exerciseFrequency: Record<string, number> = {};
-    const exercisePRs: Record<string, { weight: number; reps: number }> = {};
-    const exerciseHistory: Record<string, { date: string; weight: number; reps: number }[]> = {};
-    const recentWorkouts: string[] = [];
-    let totalVolume = 0;
+    const today = localDayNumber(now, tzOffset);
+    const inLastDays = (n: number) => workouts.filter(w => today - localDayNumber(new Date(w.date), tzOffset) < n).length;
+    sections.push(`## Training summary
+- Workouts logged (most recent ${workouts.length} shown): last 7 days ${inLastDays(7)}, last 30 days ${inLastDays(30)}
+- Last workout: ${daysAgoLabel(new Date(workouts[0].date), tzOffset)}`);
 
+    // Per-exercise history. Workouts arrive newest first, so the first time we see an exercise is its latest session.
+    type ExerciseStats = { sessions: number; lastDate: Date; lastSets: string; best: { weight: number; reps: number }; oldestTop: number; latestTop: number };
+    const stats = new Map<string, ExerciseStats>();
     for (const workout of workouts) {
-        const workoutDate = new Date(workout.date).toLocaleDateString();
-        const exerciseNames: string[] = [];
-
         for (const exercise of workout.exercises) {
-            const sets = typeof exercise.sets === 'string' ? JSON.parse(exercise.sets) : exercise.sets;
-            exerciseNames.push(exercise.name);
-
-            // Track frequency
-            exerciseFrequency[exercise.name] = (exerciseFrequency[exercise.name] || 0) + 1;
-
-            for (const set of sets) {
-                const weight = Number(set.weight) || 0;
-                const reps = Number(set.reps) || 0;
-                totalVolume += weight * reps;
-
-                // Track PRs (max weight)
-                if (!exercisePRs[exercise.name] || weight > exercisePRs[exercise.name].weight) {
-                    exercisePRs[exercise.name] = { weight, reps };
-                }
-
-                // Track progression history
-                if (!exerciseHistory[exercise.name]) exerciseHistory[exercise.name] = [];
-                exerciseHistory[exercise.name].push({ date: workoutDate, weight, reps });
+            const sets = parseSets(exercise.sets).filter(s => (Number(s.reps) || 0) > 0);
+            if (sets.length === 0) continue;
+            const top = Math.max(...sets.map(s => Number(s.weight) || 0));
+            const bestSet = sets.reduce((a, b) => ((Number(b.weight) || 0) > (Number(a.weight) || 0) ? b : a));
+            const entry = stats.get(exercise.name);
+            if (!entry) {
+                stats.set(exercise.name, {
+                    sessions: 1, lastDate: new Date(workout.date), lastSets: sets.map(formatSet).join(', '),
+                    best: { weight: Number(bestSet.weight) || 0, reps: Number(bestSet.reps) || 0 }, oldestTop: top, latestTop: top,
+                });
+            } else {
+                entry.sessions++;
+                entry.oldestTop = top;
+                if ((Number(bestSet.weight) || 0) > entry.best.weight) entry.best = { weight: Number(bestSet.weight) || 0, reps: Number(bestSet.reps) || 0 };
             }
         }
-
-        // Summarize recent workouts (top 5)
-        if (recentWorkouts.length < 5) {
-            const duration = workout.startTime && workout.endTime
-                ? `${Math.round((new Date(workout.endTime).getTime() - new Date(workout.startTime).getTime()) / 60000)} min`
-                : 'N/A';
-            recentWorkouts.push(`${workoutDate} — ${workout.name || 'Workout'} (${exerciseNames.join(', ')}) [${duration}]`);
-        }
     }
+    const exerciseLines = [...stats.entries()].slice(0, 15).map(([name, s]) => {
+        const trend = s.sessions < 2 || s.latestTop === 0 ? ''
+            : s.latestTop > s.oldestTop ? `, trend ↑ ${s.oldestTop}→${s.latestTop}kg`
+                : s.latestTop < s.oldestTop ? `, trend ↓ ${s.oldestTop}→${s.latestTop}kg` : ', trend flat';
+        const best = s.best.weight > 0 ? `, best ${s.best.weight}kg×${s.best.reps}` : '';
+        return `- ${name}: ${s.sessions} session${s.sessions === 1 ? '' : 's'}, last ${daysAgoLabel(s.lastDate, tzOffset)} (${s.lastSets})${best}${trend}`;
+    });
+    sections.push(`## Exercises (most recently trained first)\n${exerciseLines.join('\n')}`);
 
-    // Days since last workout
-    const lastWorkoutDate = new Date(workouts[0].date);
-    const daysSinceLastWorkout = Math.floor((Date.now() - lastWorkoutDate.getTime()) / (1000 * 60 * 60 * 24));
+    const recent = workouts.slice(0, 8).map(w => {
+        const minutes = w.startTime && w.endTime ? Math.round((new Date(w.endTime).getTime() - new Date(w.startTime).getTime()) / 60000) : null;
+        const exercises = w.exercises
+            .map((e: any) => `${e.name} ${parseSets(e.sets).filter(s => (Number(s.reps) || 0) > 0).map(formatSet).join(', ') || '(no sets logged)'}`)
+            .join('; ');
+        return `- ${formatLocalDate(new Date(w.date), tzOffset)} (${daysAgoLabel(new Date(w.date), tzOffset)}) "${w.name}"${minutes ? `, ${minutes} min` : ''}: ${exercises}`;
+    });
+    sections.push(`## Recent workouts\n${recent.join('\n')}`);
 
-    // Top 5 exercises by frequency
-    const topExercises = Object.entries(exerciseFrequency)
-        .sort(([, a], [, b]) => b - a)
-        .slice(0, 5)
-        .map(([name, count]) => `${name} (${count}x)`)
-        .join(', ');
+    return sections.join('\n\n');
+}
 
-    // PRs formatted
-    const prs = Object.entries(exercisePRs)
-        .filter(([, pr]) => pr.weight > 0)
-        .slice(0, 8)
-        .map(([name, pr]) => `${name}: ${pr.weight}kg × ${pr.reps} reps`)
-        .join('\n  ');
+function buildSystemPrompt(user: any, workouts: any[], pastNotes: any[], tzOffset: number): string {
+    const memory = pastNotes.length > 0
+        ? pastNotes.map(m => `- ${formatLocalDate(new Date(m.createdAt), tzOffset)}: "${m.content.slice(0, 300)}"`).join('\n')
+        : 'No earlier conversations.';
 
-    // Detect progression trends for top exercises
-    const trends: string[] = [];
-    for (const [name, history] of Object.entries(exerciseHistory).slice(0, 3)) {
-        if (history.length >= 2) {
-            const recent = history[0].weight;
-            const older = history[history.length - 1].weight;
-            if (recent > older) trends.push(`${name}: ↑ improving (${older}kg → ${recent}kg)`);
-            else if (recent < older) trends.push(`${name}: ↓ declining (${older}kg → ${recent}kg)`);
-            else trends.push(`${name}: → consistent at ${recent}kg`);
-        }
-    }
+    return `You are "AI Coach", the personal strength and fitness coach inside the AI Workout Tracker app. You are talking with ${user?.name || 'the user'}, and you have their real profile and training log below.
 
-    return `
-- Total workouts logged: ${totalWorkouts}
-- Days since last workout: ${daysSinceLastWorkout}
-- Total volume lifted: ${totalVolume.toLocaleString()} kg
-- Most trained exercises: ${topExercises}
-- Personal Records:
-  ${prs || 'No weight data recorded yet'}
-- Progression Trends:
-  ${trends.length > 0 ? trends.join('\n  ') : 'Not enough data yet'}
-- Last 5 workouts:
-  ${recentWorkouts.map(w => `• ${w}`).join('\n  ')}
-`.trim();
+How to coach:
+- Answer the question they actually asked, first and directly, then add the most useful supporting detail.
+- Be specific: name exercises, sets × reps, loads in kg, rest times and progressions. Base loads on their logged numbers when you have them (e.g. "you did 60kg×10 last time, so try 62.5kg for 8–10").
+- Use their data: notice trends, stalls, muscle groups they haven't trained recently, and how long since their last session. Never invent numbers they haven't logged; if something you need is missing, say so or ask.
+- Remember what they told you in earlier chats (injuries, goals, schedule, equipment) and take it into account without making them repeat it.
+- Pain and injuries: never tell them to push through pain. Offer pain-free alternatives and modifications (range of motion, load, tempo, exercise swaps). Recommend a doctor or physiotherapist for sharp, worsening or persistent pain, swelling, or numbness. You are a coach, not a medical professional, so don't diagnose.
+- Nutrition: practical, evidence-based guidance (protein, calories, hydration, sleep); no extreme diets.
+- If the answer depends on something ambiguous, ask one short clarifying question.
+- Tone: warm, encouraging and direct, like a knowledgeable coach messaging a client. No filler and don't repeat their question back.
+- Format with Markdown: short paragraphs, bullet lists for plans, **bold** for key numbers. Don't use tables or code blocks. A workout plan lists each exercise with sets × reps (and load when you can). Keep casual replies short; go into detail when they ask for a plan or an explanation.
+- Stay on fitness, training, recovery, nutrition and using this app; politely steer unrelated requests back.
+
+${buildTrainingBrief(user, workouts, tzOffset)}
+
+## Things they said in earlier chats (most recent last)
+${memory}`;
 }
 
 // ─────────────────────────────────────────────
-// HELPER: Generate offline fallback response
-// Used when OpenAI API is unavailable
+// Offline fallback, used when no Gemini key is configured or the API is unreachable.
+// Checks are ordered so the most important topic in a message wins (pain before greetings).
 // ─────────────────────────────────────────────
 function generateOfflineResponse(query: string, workouts: any[]): string {
-    const lowerQuery = query.toLowerCase().trim();
+    const q = query.toLowerCase().trim();
+    // Matches at the start of a word, so "eat" doesn't fire on "great" and "rest" not on "interest"
+    const has = (...words: string[]) => words.some(w => new RegExp(`\\b${w}`).test(q));
 
-    // Build basic context from workouts
     let personalContext = '';
     if (workouts.length > 0) {
-        const lastWorkout = workouts[0];
-        const exerciseNames = lastWorkout.exercises?.map((e: any) => e.name).join(', ') || 'various exercises';
-        const daysSinceLastWorkout = Math.floor((Date.now() - new Date(lastWorkout.date).getTime()) / (1000 * 60 * 60 * 24));
-        const when = daysSinceLastWorkout === 0 ? 'today' : daysSinceLastWorkout === 1 ? 'yesterday' : `${daysSinceLastWorkout} days ago`;
-        personalContext = ` Based on your data, your last workout was ${when} and included ${exerciseNames}.`;
+        const last = workouts[0];
+        const names = last.exercises?.map((e: any) => e.name).join(', ') || 'various exercises';
+        const days = Math.floor((Date.now() - new Date(last.date).getTime()) / 86400000);
+        const when = days === 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`;
+        personalContext = `\n\nFrom your log: your last workout was ${when} (${names}).`;
     }
 
-    // ── Conversational / Social responses ──
-    if (/^(thanks|thank you|thx|ty|appreciate|cheers)/i.test(lowerQuery))
-        return `You're welcome! 💪 Keep pushing and let me know if you need anything else. I'm here to help with your fitness journey!`;
-    if (/^(hi|hey|hello|sup|yo|what's up|howdy|good morning|good evening|good afternoon)/i.test(lowerQuery))
-        return `Hey there! 👋 Ready to crush it? Ask me about workout plans, specific exercises, nutrition, or your progress!${personalContext}`;
-    if (/^(bye|goodbye|see you|later|gotta go|cya)/i.test(lowerQuery))
-        return `See you next time! 🏋️ Stay consistent and keep logging your workouts. You've got this!`;
-    if (/^(ok|okay|got it|understood|cool|nice|great|awesome|perfect|alright)/i.test(lowerQuery))
-        return `Glad to help! Feel free to ask me anything else — whether it's about exercises, nutrition, recovery, or your workout plan. 💪`;
-    if (/^(help|what can you do|how does this work)/i.test(lowerQuery))
-        return `I'm your AI fitness coach! You can ask me about:\n• Workout plans for specific muscle groups\n• Exercise form and technique\n• Rest and recovery advice\n• What to train today\n• Nutrition basics\nJust type your question and I'll do my best to help! 🏋️`;
-    if (/^(how are you|how're you|how do you do)/i.test(lowerQuery))
-        return `I'm great, thanks for asking! 😊 I'm always here and ready to help you with your fitness goals. What can I help you with today?`;
-    if (lowerQuery.includes('lol') || lowerQuery.includes('haha') || lowerQuery.includes('😂'))
-        return `Haha glad I could make you smile! 😄 Anything else you'd like to know about your workouts or fitness?`;
+    // ── Pain & injuries ──
+    if (has('pain', 'hurt', 'injur', 'ache', 'aching', 'sore', 'tweak', 'strain', 'sprain')) {
+        if (has('knee')) {
+            return `Don't train through knee pain. You can still have a productive leg day by shifting to **hip-dominant, knee-friendly** work:
+
+- **Hip thrusts or glute bridges**: 3 × 10–12
+- **Romanian deadlifts** (light to moderate): 3 × 8–10
+- **Lying or seated hamstring curls**: 3 × 10–12
+- **Box squats to a pain-free depth** (only if they don't hurt): 3 × 8
+- **Calf raises**: 3 × 15
+
+Skip deep squats, lunges, jumping and leg extensions for today. Use the 0–10 pain rule: stay at **3/10 or below**, and stop any exercise that makes it worse.
+
+If the pain is sharp, comes with swelling or clicking, or lasts more than a week or two, get it checked by a doctor or physiotherapist.${personalContext}`;
+        }
+        if (has('back')) {
+            return `Take back pain seriously. Skip heavy deadlifts, bent-over rows and loaded spinal flexion for now. Gentle movement usually helps more than complete rest:
+
+- **Walking**: 15–20 minutes
+- **Bird dogs**: 3 × 8 per side
+- **Dead bugs**: 3 × 8 per side
+- **Glute bridges**: 3 × 12
+- **Machine or chest-supported work** for upper body
+
+Keep everything pain-free. See a doctor promptly if the pain spreads down a leg, or comes with numbness or weakness.${personalContext}`;
+        }
+        if (has('shoulder')) {
+            return `For shoulder pain, avoid overhead pressing, dips and wide-grip bench for now. Instead:
+
+- **Neutral-grip dumbbell press** in a pain-free range: 3 × 10
+- **Face pulls**: 3 × 15
+- **Band external rotations**: 3 × 15
+- **Chest-supported rows**: 3 × 10
+
+Lighter weights and slower reps are your friend. If it hurts at rest or at night, or you've lost strength, see a physiotherapist.${personalContext}`;
+        }
+        return `Don't train through pain. Work around it: pick exercises that don't aggravate the area, lower the weight, and shorten the range of motion. Keep discomfort at **3/10 or below**.
+
+If the pain is sharp, comes with swelling or numbness, or doesn't improve within a week or two, see a doctor or physiotherapist. Tell me which body part it is and I'll suggest specific swaps.${personalContext}`;
+    }
 
     // ── Nutrition ──
-    if (lowerQuery.includes('protein') || lowerQuery.includes('diet') || lowerQuery.includes('nutrition') || lowerQuery.includes('eat') || lowerQuery.includes('food') || lowerQuery.includes('meal'))
-        return `For muscle growth, aim for 1.6-2.2g of protein per kg body weight daily. Eat balanced meals with lean proteins, complex carbs, and healthy fats. Stay hydrated!${personalContext}`;
-    if (lowerQuery.includes('water') || lowerQuery.includes('hydrat'))
-        return `Stay hydrated! Aim for at least 2-3 liters of water daily, more on workout days. Dehydration can significantly impact your performance. 💧`;
-    if (lowerQuery.includes('supplement') || lowerQuery.includes('creatine') || lowerQuery.includes('whey'))
-        return `Key evidence-based supplements: Creatine monohydrate (5g/day), whey protein for convenience, and Vitamin D if deficient. Focus on whole foods first!`;
+    if (has('protein', 'diet', 'nutrition', 'eat', 'food', 'meal'))
+        return `For muscle growth, aim for **1.6–2.2 g of protein per kg** of body weight daily, spread over 3–5 meals. Build meals around lean protein, complex carbs, fruit and vegetables, and healthy fats.${personalContext}`;
+    if (has('water', 'hydrat'))
+        return `Aim for **2–3 litres of water** a day, more on training days and in hot weather. Even mild dehydration lowers strength and endurance. 💧`;
+    if (has('supplement', 'creatine', 'whey'))
+        return `The supplements with the best evidence are **creatine monohydrate (3–5 g/day)**, **whey protein** for convenience, and **vitamin D** if you're deficient. Get the basics right first: food, sleep and consistent training.`;
 
-    // ── Muscle Groups & Exercises ──
-    if (lowerQuery.includes('chest') || lowerQuery.includes('bench') || lowerQuery.includes('push up'))
-        return `For chest development, focus on Bench Press, Incline Dumbbell Press, and Chest Flyes. Aim for 3-4 sets of 8-12 reps.${personalContext}`;
-    if (lowerQuery.includes('back') || lowerQuery.includes('pull') || lowerQuery.includes('row'))
-        return `Great back exercises include Pull-ups, Barbell Rows, and Lat Pulldowns. Focus on squeezing your shoulder blades together.${personalContext}`;
-    if (lowerQuery.includes('leg') || lowerQuery.includes('squat') || lowerQuery.includes('lunge'))
-        return `Never skip leg day! Squats, Lunges, and Romanian Deadlifts are foundational. Drive through your heels.${personalContext}`;
-    if (lowerQuery.includes('arm') || lowerQuery.includes('bicep') || lowerQuery.includes('tricep'))
-        return `For arms, try supersetting Bicep Curls with Tricep Extensions for maximum pump.${personalContext}`;
-    if (lowerQuery.includes('shoulder') || lowerQuery.includes('delts'))
-        return `Target all three heads: Overhead Press for mass, Lateral Raises for width, Face Pulls for rear delts.${personalContext}`;
-    if (lowerQuery.includes('core') || lowerQuery.includes('abs') || lowerQuery.includes('plank'))
-        return `For a strong core, combine Planks, Hanging Leg Raises, and Cable Crunches. Train abs 2-3x per week with progressive overload.${personalContext}`;
+    // ── Training goals ──
+    if (has('weight loss', 'lose weight', 'fat loss', 'lose fat', 'cut'))
+        return `Fat loss comes down to a **300–500 kcal daily deficit**, high protein (~2 g/kg), and continuing to lift heavy so you keep your muscle. Add daily steps (8–10k) before adding lots of cardio.${personalContext}`;
+    if (has('bulk', 'gain muscle', 'build muscle', 'grow'))
+        return `To build muscle: a small surplus (**+200–300 kcal**), **1.8–2.2 g/kg protein**, progressive overload on compound lifts, and **7–9 hours of sleep**.${personalContext}`;
+    if (has('split', 'routine', 'program', 'plan'))
+        return `Popular splits:
+- **Full body, 3 days**: best for beginners
+- **Upper/Lower, 4 days**: a good balance of frequency and recovery
+- **Push/Pull/Legs, 6 days**: for intermediate lifters with time to train
 
-    // ── Training advice ──
-    if (lowerQuery.includes('today') || lowerQuery.includes('what should'))
-        return `I'd suggest focusing on progressive overload — try adding 2.5kg or 1-2 extra reps to your main lifts.${personalContext}`;
-    if (lowerQuery.includes('rest') || lowerQuery.includes('recover') || lowerQuery.includes('sleep'))
-        return `Muscles grow while you rest. Aim for 7-9 hours of sleep and 1-2 rest days per week.${personalContext}`;
-    if (lowerQuery.includes('warm') || lowerQuery.includes('stretch'))
-        return `Always warm up! 5-10 min of light cardio, then dynamic stretches. Save static stretching for after your workout. This prevents injuries and improves performance.`;
-    if (lowerQuery.includes('beginner') || lowerQuery.includes('start') || lowerQuery.includes('new'))
-        return `Welcome! Start with compound movements: Squats, Bench Press, Deadlifts, Rows, and Overhead Press. Begin light, focus on form, and gradually increase weight each week. 3 full-body sessions per week is great for beginners!${personalContext}`;
-    if (lowerQuery.includes('split') || lowerQuery.includes('routine') || lowerQuery.includes('program') || lowerQuery.includes('plan'))
-        return `Popular splits:\n• Push/Pull/Legs (6 days) — great for intermediate+\n• Upper/Lower (4 days) — good balance\n• Full Body (3 days) — perfect for beginners\nPick one that fits your schedule and stick with it consistently!${personalContext}`;
-    if (lowerQuery.includes('cardio') || lowerQuery.includes('running') || lowerQuery.includes('hiit'))
-        return `Mix both LISS (walking, light jogging) and HIIT. 2-3 cardio sessions per week won't hurt your gains. Do cardio after lifting or on separate days.${personalContext}`;
-    if (lowerQuery.includes('weight loss') || lowerQuery.includes('lose weight') || lowerQuery.includes('fat') || lowerQuery.includes('cut'))
-        return `Fat loss = caloric deficit + strength training + adequate protein. Aim for a 300-500 calorie deficit, keep protein high (2g/kg), and lift heavy to preserve muscle.${personalContext}`;
-    if (lowerQuery.includes('muscle') || lowerQuery.includes('bulk') || lowerQuery.includes('gain') || lowerQuery.includes('grow'))
-        return `For muscle growth: caloric surplus (200-300 cal above maintenance), high protein (1.8-2.2g/kg), progressive overload, and 7-9 hours of sleep. Consistency is king! 👑${personalContext}`;
+Choose the one you can stick to consistently.${personalContext}`;
 
-    // ── Fallback ──
-    return `That's a great topic! I can help you with workout plans, exercise form, nutrition advice, and tracking your progress. Try asking about a specific muscle group, workout split, or fitness goal!${personalContext}`;
+    // ── Muscle groups ──
+    if (has('leg', 'squat', 'lunge', 'quad', 'hamstring', 'glute'))
+        return `A solid leg day:
+- **Squats**: 4 × 6–8
+- **Romanian deadlifts**: 3 × 8–10
+- **Walking lunges**: 3 × 10 per leg
+- **Leg curls**: 3 × 12
+- **Calf raises**: 3 × 15
+
+Rest 2–3 minutes on the big lifts.${personalContext}`;
+    if (has('chest', 'bench', 'push up', 'push-up'))
+        return `For chest: **bench press 4 × 6–8**, **incline dumbbell press 3 × 8–10**, **cable or dumbbell flyes 3 × 12**. Add a little weight or a rep each week.${personalContext}`;
+    if (has('back', 'pull', 'row', 'lat'))
+        return `For back: **pull-ups or lat pulldowns 4 × 8**, **barbell or dumbbell rows 3 × 8–10**, **face pulls 3 × 15**. Lead with your elbows and squeeze your shoulder blades.${personalContext}`;
+    if (has('shoulder', 'delt'))
+        return `For shoulders: **overhead press 4 × 6–8** for strength, **lateral raises 3 × 12–15** for width, **face pulls 3 × 15** for rear delts and shoulder health.${personalContext}`;
+    if (has('arm', 'bicep', 'tricep'))
+        return `For arms, superset **curls 3 × 10–12** with **tricep pushdowns or extensions 3 × 10–12**. Control the lowering phase for a better pump.${personalContext}`;
+    if (has('core', 'abs', 'plank'))
+        return `For core: **planks 3 × 45 s**, **hanging leg raises 3 × 10**, **cable crunches 3 × 12**. Train it 2–3 times a week.${personalContext}`;
+    if (has('cardio', 'run', 'hiit'))
+        return `Mix easy cardio (walking, cycling) with 1–2 short HIIT sessions a week. Do cardio after lifting or on separate days so it doesn't hurt your strength work.${personalContext}`;
+    if (has('rest', 'recover', 'sleep'))
+        return `Muscles grow while you recover: aim for **7–9 hours of sleep** and **1–2 rest days a week**. Light walking on rest days helps.${personalContext}`;
+    if (has('warm up', 'warm-up', 'stretch'))
+        return `Warm up with 5 minutes of light cardio, then dynamic stretches and 2–3 lighter ramp-up sets of your first lift. Save static stretching for after training.`;
+    if (has('today', 'what should', 'what to train'))
+        return `Train the muscle group you've rested the longest, and aim to beat last time by **one rep or 2.5 kg** on your main lift.${personalContext}`;
+
+    // ── Social ── (only when the whole message is small talk, so "hey, my knee hurts" isn't treated as a greeting)
+    if (/^(hi|hey|hello|yo|sup|hiya|howdy|good (morning|afternoon|evening))\b[\s\w!.,]{0,12}$/i.test(q))
+        return `Hey! 👋 What are we working on today: a workout plan, a specific lift, nutrition, or your progress?${personalContext}`;
+    const short = q.split(/\s+/).length <= 6;
+    if (short && /\b(thanks|thank you|thx|ty|cheers|appreciate it)\b/i.test(q))
+        return `You're welcome! 💪 Let me know if there's anything else.`;
+    if (short && /\b(bye|goodbye|see you|cya)\b/i.test(q))
+        return `See you next time. Stay consistent and keep logging your workouts! 🏋️`;
+
+    return `I can help with workout plans, specific exercises, pain-free alternatives, nutrition and your progress. Tell me a bit more about what you need.${personalContext}`;
 }
 
+const makeTitle = (message: string) => {
+    const firstLine = message.split('\n')[0].trim();
+    return firstLine.length > 60 ? `${firstLine.slice(0, 57)}...` : firstLine;
+};
+
 // ═════════════════════════════════════════════
-// POST /ai/chat — Send message, get personalized AI response
+// GET /ai/conversations — list the user's chats, newest first
 // ═════════════════════════════════════════════
-router.post('/chat', authenticateToken, async (req: any, res) => {
+router.get('/conversations', authenticateToken, async (req: any, res) => {
     try {
-        const { message } = req.body;
-        const userId = req.user.id;
-
-        if (!message || typeof message !== 'string') {
-            res.status(400).json({ error: 'Message is required' });
-            return;
-        }
-
-        // 1. Fetch user's workout history (last 20 workouts)
-        const workouts = await prisma.workout.findMany({
-            where: { userId },
-            include: { exercises: true },
-            orderBy: { date: 'desc' },
-            take: 20,
+        const conversations = await prisma.conversation.findMany({
+            where: { userId: req.user.id },
+            orderBy: { updatedAt: 'desc' },
+            take: 100,
+            include: { messages: { orderBy: { createdAt: 'desc' }, take: 1 } },
         });
-
-        // 2. Build the user training profile
-        const userProfile = buildUserProfile(workouts);
-
-        // 3. Fetch recent chat history for conversation context (last 20 messages, oldest first)
-        const chatHistory = (await prisma.chatMessage.findMany({
-            where: { userId },
-            orderBy: { createdAt: 'desc' },
-            take: 20,
-        })).reverse();
-
-        // 4. Save the user's message to DB
-        await prisma.chatMessage.create({
-            data: { role: 'user', content: message, userId },
-        });
-
-        // 5. Build the personalized system prompt
-        const systemPrompt = `You are a personalized AI fitness coach named "AI Coach". You have access to this specific user's real workout data. Use it to give specific, data-driven, personalized advice.
-
-USER'S TRAINING PROFILE:
-${userProfile}
-
-INSTRUCTIONS:
-- Reference their actual exercises, weights, and rep counts when relevant
-- Notice and comment on trends (improving/plateauing/declining performance)
-- Suggest progressive overload based on their recent numbers (e.g., "try 72.5kg next time")
-- Be encouraging, supportive, but data-driven
-- If they ask what to train, consider what they trained recently and suggest something different
-- Keep responses concise (2-4 paragraphs max) and actionable
-- Use emojis sparingly for a friendly tone
-- If they have no workout data, give general beginner-friendly advice and encourage them to log their first workout`;
-
-        // 6. Build messages array for OpenAI
-        const openaiMessages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
-            { role: 'system', content: systemPrompt },
-            ...chatHistory.map((m) => ({
-                role: m.role as 'user' | 'assistant',
-                content: m.content,
-            })),
-            { role: 'user', content: message },
-        ];
-
-        let assistantContent: string;
-
-        try {
-            if (!openai) throw new Error('OPENAI_API_KEY not configured');
-
-            // 7. Call OpenAI
-            const completion = await openai.chat.completions.create({
-                model: OPENAI_MODEL,
-                messages: openaiMessages,
-                max_tokens: 500,
-                temperature: 0.7,
-            });
-
-            assistantContent = completion.choices[0].message.content || "I couldn't generate a response. Please try again!";
-        } catch (aiError: any) {
-            console.log('OpenAI API error, using offline fallback:', aiError.message);
-            // Fallback to offline response
-            assistantContent = generateOfflineResponse(message, workouts);
-        }
-
-        // 8. Save the assistant's response to DB
-        await prisma.chatMessage.create({
-            data: { role: 'assistant', content: assistantContent, userId },
-        });
-
-        res.json({ response: assistantContent });
-    } catch (error: any) {
-        console.error('Chat error:', error);
-        res.status(500).json({ error: 'Failed to process chat message' });
+        res.json(conversations.map(c => ({
+            id: c.id,
+            title: c.title,
+            createdAt: c.createdAt,
+            updatedAt: c.updatedAt,
+            // plain-text preview: drop Markdown symbols and line breaks
+            preview: (c.messages[0]?.content || '').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120),
+        })));
+    } catch (error) {
+        console.error('Conversations fetch error:', error);
+        res.status(500).json({ error: 'Failed to fetch conversations' });
     }
 });
 
 // ═════════════════════════════════════════════
-// GET /ai/history — Fetch chat history
+// GET /ai/conversations/:id/messages — one chat's messages
 // ═════════════════════════════════════════════
-router.get('/history', authenticateToken, async (req: any, res) => {
+router.get('/conversations/:id/messages', authenticateToken, async (req: any, res) => {
     try {
-        const userId = req.user.id;
+        const { id } = req.params;
+        if (!isObjectId(id)) return res.status(404).json({ error: 'Conversation not found' });
+        const conversation = await prisma.conversation.findFirst({ where: { id, userId: req.user.id } });
+        if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
 
         const messages = await prisma.chatMessage.findMany({
-            where: { userId },
+            where: { conversationId: id },
             orderBy: { createdAt: 'asc' },
         });
-
-        res.json(messages);
-    } catch (error: any) {
-        console.error('History fetch error:', error);
-        res.status(500).json({ error: 'Failed to fetch chat history' });
+        res.json({
+            conversation: { id: conversation.id, title: conversation.title },
+            messages: messages.map(m => ({ id: m.id, role: m.role, content: m.content, createdAt: m.createdAt })),
+        });
+    } catch (error) {
+        console.error('Messages fetch error:', error);
+        res.status(500).json({ error: 'Failed to fetch messages' });
     }
 });
 
 // ═════════════════════════════════════════════
-// DELETE /ai/history — Clear all chat history
+// DELETE /ai/conversations/:id — delete one chat
+// ═════════════════════════════════════════════
+router.delete('/conversations/:id', authenticateToken, async (req: any, res) => {
+    try {
+        const { id } = req.params;
+        const userId = req.user.id;
+        if (!isObjectId(id)) return res.status(404).json({ error: 'Conversation not found' });
+        await prisma.chatMessage.deleteMany({ where: { conversationId: id, userId } });
+        const { count } = await prisma.conversation.deleteMany({ where: { id, userId } });
+        if (count === 0) return res.status(404).json({ error: 'Conversation not found' });
+        res.json({ message: 'Conversation deleted' });
+    } catch (error) {
+        console.error('Conversation delete error:', error);
+        res.status(500).json({ error: 'Failed to delete conversation' });
+    }
+});
+
+// ═════════════════════════════════════════════
+// DELETE /ai/history — delete all chats
 // ═════════════════════════════════════════════
 router.delete('/history', authenticateToken, async (req: any, res) => {
     try {
         const userId = req.user.id;
-
-        await prisma.chatMessage.deleteMany({
-            where: { userId },
-        });
-
+        await prisma.chatMessage.deleteMany({ where: { userId } });
+        await prisma.conversation.deleteMany({ where: { userId } });
         res.json({ message: 'Chat history cleared' });
-    } catch (error: any) {
+    } catch (error) {
         console.error('History clear error:', error);
         res.status(500).json({ error: 'Failed to clear chat history' });
+    }
+});
+
+// ═════════════════════════════════════════════
+// POST /ai/chat — send a message; the reply is streamed back as Server-Sent Events:
+//   event: meta   { conversationId, title }
+//   event: delta  { text }            (repeated)
+//   event: done   { messageId, offline }
+//   event: error  { error }
+// ═════════════════════════════════════════════
+router.post('/chat', authenticateToken, async (req: any, res) => {
+    const userId = req.user.id;
+    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+    const tzOffset = Number(req.body?.tzOffset) || 0;
+    const requestedId = req.body?.conversationId;
+
+    if (!message) return res.status(400).json({ error: 'Message is required' });
+    if (message.length > MAX_MESSAGE_LENGTH) return res.status(400).json({ error: `Message is too long (max ${MAX_MESSAGE_LENGTH} characters)` });
+
+    const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
+    try {
+        let conversation = null;
+        if (requestedId) {
+            conversation = isObjectId(requestedId)
+                ? await prisma.conversation.findFirst({ where: { id: requestedId, userId } })
+                : null;
+            if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+        }
+
+        // Gather context before saving the new message
+        const [user, workouts, history, pastNotes] = await Promise.all([
+            prisma.user.findUnique({ where: { id: userId }, select: { name: true, height: true, weight: true, gender: true } }),
+            prisma.workout.findMany({ where: { userId }, include: { exercises: true }, orderBy: { date: 'desc' }, take: WORKOUTS_IN_CONTEXT }),
+            conversation
+                ? prisma.chatMessage.findMany({ where: { conversationId: conversation.id }, orderBy: { createdAt: 'desc' }, take: HISTORY_MESSAGES })
+                : Promise.resolve([]),
+            prisma.chatMessage.findMany({
+                where: { userId, role: 'user', ...(conversation ? { NOT: { conversationId: conversation.id } } : {}) },
+                orderBy: { createdAt: 'desc' },
+                take: PAST_CHAT_NOTES,
+            }),
+        ]);
+
+        if (!conversation) conversation = await prisma.conversation.create({ data: { userId, title: makeTitle(message) } });
+        await prisma.chatMessage.create({ data: { role: 'user', content: message, userId, conversationId: conversation.id } });
+
+        const system = buildSystemPrompt(user, workouts, pastNotes.reverse(), tzOffset);
+        const turns: ChatTurn[] = [
+            ...history.reverse().map(m => ({ role: m.role as ChatTurn['role'], content: m.content })),
+            { role: 'user', content: message },
+        ];
+
+        res.status(200);
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+        send('meta', { conversationId: conversation.id, title: conversation.title });
+
+        // Stop generating if the user presses Stop or leaves the page
+        const abort = new AbortController();
+        let clientGone = false;
+        res.on('close', () => {
+            if (!res.writableEnded) { clientGone = true; abort.abort(); }
+        });
+
+        let reply = '';
+        let offline = false;
+        try {
+            if (!aiEnabled()) throw new Error('GEMINI_API_KEY is not configured');
+            for await (const chunk of streamChat(system, turns, abort.signal)) {
+                reply += chunk;
+                send('delta', { text: chunk });
+            }
+            if (!reply.trim()) throw new Error('empty reply');
+        } catch (aiError: any) {
+            if (clientGone) {
+                // keep whatever was generated before the user stopped it
+            } else if (!reply) {
+                console.log('AI unavailable, using offline coach:', aiError.message);
+                offline = true;
+                reply = generateOfflineResponse(message, workouts);
+                send('delta', { text: reply });
+            } else {
+                console.error('AI reply interrupted:', aiError.message);
+                const note = '\n\n_(The reply was interrupted. Please ask again.)_';
+                reply += note;
+                send('delta', { text: note });
+            }
+        }
+
+        if (reply.trim()) {
+            const saved = await prisma.chatMessage.create({
+                data: { role: 'assistant', content: reply, userId, conversationId: conversation.id },
+            });
+            await prisma.conversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } });
+            if (!clientGone) send('done', { messageId: saved.id, offline });
+        }
+        if (!clientGone) res.end();
+    } catch (error: any) {
+        console.error('Chat error:', error);
+        if (res.headersSent) {
+            send('error', { error: 'Failed to process chat message' });
+            res.end();
+        } else {
+            res.status(500).json({ error: 'Failed to process chat message' });
+        }
     }
 });
 

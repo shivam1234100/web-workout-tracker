@@ -13,7 +13,7 @@ A full-stack AI-powered workout tracker with personalized coaching, exercise lib
 - **💪 Workout Tracking** — Live session timer, set/rep/weight logging with completion checkmarks, add/remove sets and exercises; the in-progress session survives page refreshes
 - **📚 Exercise Library** — 27 exercises with search, muscle-group and difficulty filters, step-by-step instructions, and tutorial links
 - **📅 Workout History** — Past workouts with per-set breakdowns, duration, and delete
-- **🤖 AI Coach** — Chat with an OpenAI-powered coach that reads your real training data (PRs, volume, progression trends, recent sessions) to give personalized advice; falls back to a rule-based offline coach when no API key is set
+- **🤖 AI Coach** — A ChatGPT-style coach powered by Google Gemini (free tier). Replies stream in word by word, chats are saved as separate threads, and every answer is grounded in your profile, per-exercise history (last sets, bests, trends) and what you told it in earlier chats (e.g. injuries). Falls back to a rule-based offline coach if the AI is unavailable
 - **📈 Weekly Insights** — Monday–Sunday stats (volume, sets, reps, time) plus an AI-written weekly review that refreshes as you log workouts
 - **👤 Profile** — Manage name, height, weight, and gender
 - **📱 Fully Responsive** — Mobile-first design with bottom nav bar and sidebar overlay
@@ -27,7 +27,7 @@ A full-stack AI-powered workout tracker with personalized coaching, exercise lib
 | **Frontend** | React 18 + Vite 6 |
 | **Backend** | Express.js + TypeScript |
 | **Database** | MongoDB (via Prisma ORM) |
-| **AI** | OpenAI Chat Completions (`gpt-4o-mini` by default) |
+| **AI** | Google Gemini API (free tier), streamed to the browser with Server-Sent Events |
 | **Hosting** | Vercel (frontend) + Render (backend) + MongoDB Atlas (database) |
 
 ---
@@ -51,8 +51,10 @@ A full-stack AI-powered workout tracker with personalized coaching, exercise lib
 │   ├── routes/
 │   │   ├── auth.ts          # Auth, profile, password reset
 │   │   ├── workout.ts       # CRUD workouts & exercises
-│   │   ├── ai.ts            # AI coach chat with context
+│   │   ├── ai.ts            # AI coach: conversations, context building, streaming
 │   │   └── summary.ts       # Weekly AI summaries
+│   ├── lib/
+│   │   └── llm.ts           # Gemini client (streaming, model fallback)
 │   ├── middleware/
 │   │   └── auth.ts          # JWT authentication
 │   ├── prisma/
@@ -115,7 +117,7 @@ npm run dev
 ### Step by step
 
 1. **MongoDB Atlas** — create a free M0 cluster → *Database Access*: add a user → *Network Access*: add `0.0.0.0/0` → *Connect → Drivers*: copy the connection string and add the database name before the `?` (e.g. `...mongodb.net/ai-workout-tracker?retryWrites=true&w=majority`).
-2. **Render** — *New → Blueprint* and pick this repo (uses `render.yaml`), or *New → Web Service* with the settings above. Set `DATABASE_URL`, and optionally `OPENAI_API_KEY` / `RESEND_API_KEY`. After the deploy, open `https://<your-service>.onrender.com/health` — it should return `{"status":"ok"}`.
+2. **Render** — *New → Blueprint* and pick this repo (uses `render.yaml`), or *New → Web Service* with the settings above. Set `DATABASE_URL` and `GEMINI_API_KEY` (free at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)), and optionally `RESEND_API_KEY`. After the deploy, open `https://<your-service>.onrender.com/health` — it should return `{"status":"ok"}`.
 3. **Vercel** — *Add New → Project*, import this repo, set **Root Directory** to `client`, add `VITE_API_URL=https://<your-service>.onrender.com`, deploy.
 4. Back on Render, set `FRONTEND_URL` to your Vercel URL so CORS allows it.
 
@@ -131,8 +133,8 @@ npm run dev
 | `NODE_ENV` | ✅ | `production` (never exposes reset codes in API responses) |
 | `PORT` | ❌ | Set automatically by Render |
 | `FRONTEND_URL` | ❌ | Vercel URL(s) for CORS, comma-separated |
-| `OPENAI_API_KEY` | ❌ | Enables real AI responses (offline coach otherwise) |
-| `OPENAI_MODEL` | ❌ | Defaults to `gpt-4o-mini` |
+| `GEMINI_API_KEY` | ❌ | Free Google AI Studio key; enables the real AI coach and AI weekly summaries (offline coach otherwise) |
+| `GEMINI_MODEL` | ❌ | Defaults to `gemini-3.6-flash`; if Google retires it, the app falls back to `gemini-flash-latest` automatically |
 | `RESEND_API_KEY` | ❌ | Emails password reset codes. With Resend's test sender, mail is only delivered to your own Resend account email unless you verify a domain |
 
 **Frontend (Vercel):**
@@ -168,9 +170,11 @@ Live workout timer, exercise selection, and set/rep/weight logging with completi
 | `GET` | `/workouts` | Get user workouts |
 | `POST` | `/workouts` | Save a workout |
 | `DELETE` | `/workouts/:id` | Delete a workout |
-| `POST` | `/ai/chat` | Send message to AI coach |
-| `GET` | `/ai/history` | Get chat history |
-| `DELETE` | `/ai/history` | Clear chat history |
+| `POST` | `/ai/chat` | Send a message; the reply streams back as Server-Sent Events |
+| `GET` | `/ai/conversations` | List chats |
+| `GET` | `/ai/conversations/:id/messages` | Get one chat's messages |
+| `DELETE` | `/ai/conversations/:id` | Delete one chat |
+| `DELETE` | `/ai/history` | Delete all chats |
 | `POST` | `/summary/weekly` | Generate weekly summary |
 | `GET` | `/summary/weekly` | Get past summaries |
 | `GET` | `/health` | Health check |
