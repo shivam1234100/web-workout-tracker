@@ -13,7 +13,9 @@ export default function DashboardPage() {
 
     useEffect(() => {
         fetchHistory();
-        setDailyQuote(MOCK_QUOTES[Math.floor(Math.random() * MOCK_QUOTES.length)]);
+        // Same quote all day, a new one each day
+        const dayNumber = Math.floor((Date.now() - new Date().getTimezoneOffset() * 60000) / 86400000);
+        setDailyQuote(MOCK_QUOTES[dayNumber % MOCK_QUOTES.length]);
     }, [fetchHistory]);
 
     const getGreeting = () => {

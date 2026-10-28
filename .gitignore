@@ -3,3 +3,6 @@ dist/
 .env
 .DS_Store
 ai-workout-tracker-source/
+.claude/
+*.db
+*.log

@@ -2,10 +2,10 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWorkout } from '../context/WorkoutContext';
 import { MOCK_EXERCISES } from '../constants/mockData';
-import { Plus, Check, Clock, PlayCircle, X, Search } from 'lucide-react';
+import { Plus, Check, Clock, PlayCircle, X, Search, Trash2 } from 'lucide-react';
 
 export default function WorkoutPage() {
-    const { activeWorkout, startWorkout, addExercise, addSet, updateSet, finishWorkout } = useWorkout();
+    const { activeWorkout, startWorkout, addExercise, addSet, updateSet, removeSet, removeExercise, discardWorkout, finishWorkout } = useWorkout();
     const navigate = useNavigate();
     const [duration, setDuration] = useState(0);
     const [showFinishModal, setShowFinishModal] = useState(false);
@@ -13,6 +13,9 @@ export default function WorkoutPage() {
     const [workoutName, setWorkoutName] = useState('');
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedBodyPart, setSelectedBodyPart] = useState('All');
+    const [showDiscardModal, setShowDiscardModal] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [saveError, setSaveError] = useState('');
 
     useEffect(() => {
         let interval;
@@ -33,9 +36,18 @@ export default function WorkoutPage() {
     };
 
     const handleFinish = async () => {
-        await finishWorkout(workoutName.trim() || undefined);
+        setSaving(true);
+        setSaveError('');
+        const error = await finishWorkout(workoutName.trim() || undefined);
+        setSaving(false);
+        if (error) { setSaveError(error); return; }
         setShowFinishModal(false);
         navigate('/history');
+    };
+
+    const handleDiscard = () => {
+        discardWorkout();
+        setShowDiscardModal(false);
     };
 
     const bodyParts = ['All', 'Chest', 'Back', 'Legs', 'Shoulders', 'Arms', 'Core'];
@@ -80,9 +92,14 @@ export default function WorkoutPage() {
                         <span style={{ color: 'var(--accent-blue)', fontWeight: 600, fontSize: 14 }}>{formatTime(duration)}</span>
                     </div>
                 </div>
-                <button className="btn" style={{ background: 'var(--accent-green)', color: '#fff' }} onClick={() => { setWorkoutName(''); setShowFinishModal(true); }}>
-                    Finish Workout
-                </button>
+                <div className="flex gap-8">
+                    <button className="btn btn-ghost" style={{ color: 'var(--accent-red)' }} onClick={() => setShowDiscardModal(true)}>
+                        Discard
+                    </button>
+                    <button className="btn" style={{ background: 'var(--accent-green)', color: '#fff' }} onClick={() => { setWorkoutName(''); setSaveError(''); setShowFinishModal(true); }}>
+                        Finish Workout
+                    </button>
+                </div>
             </div>
 
             {/* Exercises */}
@@ -96,9 +113,14 @@ export default function WorkoutPage() {
                     <div className="flex-col gap-16">
                         {activeWorkout.exercises.map((exercise, exIdx) => (
                             <div key={exercise.id} className="workout-exercise-card">
-                                <h4>{exercise.name}</h4>
+                                <div className="workout-exercise-header">
+                                    <h4>{exercise.name}</h4>
+                                    <button className="set-remove-btn" title="Remove exercise" aria-label={`Remove ${exercise.name}`} onClick={() => removeExercise(exIdx)}>
+                                        <Trash2 size={16} />
+                                    </button>
+                                </div>
                                 <div className="set-row-header">
-                                    <span>Set</span><span>KG</span><span>Reps</span><span>Done</span>
+                                    <span>Set</span><span>KG</span><span>Reps</span><span>Done</span><span />
                                 </div>
                                 {exercise.sets.map((set, setIdx) => (
                                     <div key={set.id} className={`set-row ${set.completed ? 'completed' : ''}`}>
@@ -107,6 +129,9 @@ export default function WorkoutPage() {
                                         <input className="input input-sm" type="number" placeholder="0" value={set.reps || ''} onChange={e => updateSet(exIdx, setIdx, 'reps', Number(e.target.value))} />
                                         <button className={`set-done-btn ${set.completed ? 'done' : 'not-done'}`} onClick={() => updateSet(exIdx, setIdx, 'completed', !set.completed)}>
                                             <Check size={16} />
+                                        </button>
+                                        <button className="set-remove-btn" title="Remove set" aria-label={`Remove set ${setIdx + 1}`} onClick={() => removeSet(exIdx, setIdx)} disabled={exercise.sets.length === 1}>
+                                            <X size={14} />
                                         </button>
                                     </div>
                                 ))}
@@ -137,11 +162,37 @@ export default function WorkoutPage() {
                             <h2>Save Workout</h2>
                             <button className="btn-icon" onClick={() => setShowFinishModal(false)}><X size={18} /></button>
                         </div>
-                        <div className="input-group" style={{ marginBottom: 24 }}>
-                            <label>Workout Name (Optional)</label>
-                            <input className="input" placeholder="e.g. Leg Day Destruction" value={workoutName} onChange={e => setWorkoutName(e.target.value)} autoFocus />
+                        {activeWorkout.exercises.length === 0 ? (
+                            <p style={{ color: 'var(--text-secondary)', marginBottom: 24 }}>Add at least one exercise before saving, or discard this workout.</p>
+                        ) : (
+                            <>
+                                {saveError && <div className="alert alert-error mb-16">{saveError}</div>}
+                                <div className="input-group" style={{ marginBottom: 24 }}>
+                                    <label>Workout Name (Optional)</label>
+                                    <input className="input" placeholder="e.g. Leg Day Destruction" value={workoutName} onChange={e => setWorkoutName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !saving) handleFinish(); }} autoFocus />
+                                </div>
+                                <button className="btn btn-primary btn-lg btn-full" onClick={handleFinish} disabled={saving}>
+                                    {saving ? <div className="spinner" style={{ width: 20, height: 20, borderWidth: 2 }} /> : 'Save & Finish'}
+                                </button>
+                            </>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* Discard Modal */}
+            {showDiscardModal && (
+                <div className="modal-overlay" onClick={() => setShowDiscardModal(false)}>
+                    <div className="modal" onClick={e => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <h2>Discard Workout?</h2>
+                            <button className="btn-icon" onClick={() => setShowDiscardModal(false)}><X size={18} /></button>
                         </div>
-                        <button className="btn btn-primary btn-lg btn-full" onClick={handleFinish}>Save & Finish</button>
+                        <p style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>This session and all its sets will be thrown away. This can't be undone.</p>
+                        <div className="confirm-actions">
+                            <button className="btn btn-secondary" onClick={() => setShowDiscardModal(false)}>Keep Going</button>
+                            <button className="btn btn-danger" onClick={handleDiscard}>Discard</button>
+                        </div>
                     </div>
                 </div>
             )}

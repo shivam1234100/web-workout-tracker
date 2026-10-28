@@ -34,17 +34,21 @@ router.post('/', authenticateToken, async (req: any, res) => {
     try {
         const { name, startTime, endTime, exercises } = req.body;
 
+        if (!Array.isArray(exercises) || exercises.length === 0) {
+            return res.status(400).json({ error: 'A workout needs at least one exercise' });
+        }
+
         const workout = await prisma.workout.create({
             data: {
                 userId: req.user.id,
-                name,
+                name: typeof name === 'string' && name.trim() ? name.trim() : `Workout ${new Date().toLocaleDateString()}`,
                 date: new Date(),
                 startTime: startTime ? new Date(startTime) : null,
                 endTime: endTime ? new Date(endTime) : null,
                 exercises: {
                     create: exercises.map((e: any) => ({
-                        name: e.name,
-                        sets: JSON.stringify(e.sets)
+                        name: String(e.name),
+                        sets: JSON.stringify(Array.isArray(e.sets) ? e.sets : [])
                     }))
                 }
             },
@@ -63,16 +67,18 @@ router.post('/', authenticateToken, async (req: any, res) => {
         res.json(formattedWorkout);
     } catch (error) {
         console.error(error);
-        res.status(500).json({ error: 'Error saving workout', details: error });
+        res.status(500).json({ error: 'Error saving workout' });
     }
 });
 
 // Delete workout
 router.delete('/:id', authenticateToken, async (req: any, res) => {
     try {
-        await prisma.workout.delete({
+        // deleteMany scoped to the user: a user can never delete someone else's workout
+        const { count } = await prisma.workout.deleteMany({
             where: { id: req.params.id, userId: req.user.id }
         });
+        if (count === 0) return res.status(404).json({ error: 'Workout not found' });
         res.json({ message: 'Workout deleted' });
     } catch (error) {
         res.status(500).json({ error: 'Error deleting workout' });

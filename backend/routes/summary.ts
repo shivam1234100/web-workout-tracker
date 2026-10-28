@@ -6,9 +6,8 @@ import { authenticateToken } from '../middleware/auth';
 const router = express.Router();
 const prisma = new PrismaClient();
 
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY || 'mock_key',
-});
+const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 // ─────────────────────────────────────────────
 // HELPER: Compute weekly stats from workouts
@@ -78,7 +77,7 @@ function generateOfflineSummary(stats: any): string {
 
     return `📊 **Weekly Training Summary**
 
-🏋️ **${stats.totalWorkouts} workouts** completed this week
+🏋️ **${stats.totalWorkouts} workout${stats.totalWorkouts === 1 ? '' : 's'}** completed this week
 ⏱️ Total training time: ${stats.totalDurationMin} minutes
 📈 Total volume: ${stats.totalVolume.toLocaleString()} kg
 💪 Total sets: ${stats.totalSets} | Total reps: ${stats.totalReps}
@@ -95,17 +94,17 @@ router.post('/weekly', authenticateToken, async (req: any, res) => {
     try {
         const userId = req.user.id;
 
-        // Calculate week boundaries (Monday to Sunday)
-        const now = new Date();
-        const dayOfWeek = now.getDay(); // 0=Sun, 1=Mon...
+        // Calculate week boundaries (Monday to Sunday) in the user's timezone.
+        // tzOffset is the client's Date#getTimezoneOffset() in minutes (e.g. -330 for IST).
+        const tzOffset = Number(req.body?.tzOffset) || 0;
+        const local = new Date(Date.now() - tzOffset * 60000); // UTC fields now read as local time
+        const dayOfWeek = local.getUTCDay(); // 0=Sun, 1=Mon...
         const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-        const weekStart = new Date(now);
-        weekStart.setDate(now.getDate() + mondayOffset);
-        weekStart.setHours(0, 0, 0, 0);
+        local.setUTCDate(local.getUTCDate() + mondayOffset);
+        local.setUTCHours(0, 0, 0, 0);
 
-        const weekEnd = new Date(weekStart);
-        weekEnd.setDate(weekStart.getDate() + 6);
-        weekEnd.setHours(23, 59, 59, 999);
+        const weekStart = new Date(local.getTime() + tzOffset * 60000);
+        const weekEnd = new Date(weekStart.getTime() + 7 * 24 * 60 * 60 * 1000 - 1);
 
         // Check if a summary already exists for this week
         const existingSummary = await prisma.weeklySummary.findFirst({
@@ -115,11 +114,6 @@ router.post('/weekly', authenticateToken, async (req: any, res) => {
                 weekEnd: { lte: new Date(weekEnd.getTime() + 1000) },
             },
         });
-
-        if (existingSummary) {
-            res.json(existingSummary);
-            return;
-        }
 
         // Fetch this week's workouts
         const workouts = await prisma.workout.findMany({
@@ -134,9 +128,17 @@ router.post('/weekly', authenticateToken, async (req: any, res) => {
         // Compute stats
         const stats = computeWeeklyStats(workouts);
 
+        // Reuse the saved summary unless the week's workouts changed since it was generated
+        if (existingSummary && existingSummary.stats === JSON.stringify(stats)) {
+            res.json(existingSummary);
+            return;
+        }
+
         let summaryText: string;
 
         try {
+            if (!openai) throw new Error('OPENAI_API_KEY not configured');
+
             // Generate AI summary
             const statsText = JSON.stringify(stats, null, 2);
             const workoutDetails = workouts.map(w => {
@@ -148,7 +150,7 @@ router.post('/weekly', authenticateToken, async (req: any, res) => {
             }).join('\n\n');
 
             const completion = await openai.chat.completions.create({
-                model: 'gpt-3.5-turbo',
+                model: OPENAI_MODEL,
                 messages: [
                     {
                         role: 'system',
@@ -181,16 +183,21 @@ Include:
             summaryText = generateOfflineSummary(stats);
         }
 
-        // Save to DB
-        const summary = await prisma.weeklySummary.create({
-            data: {
-                userId,
-                weekStart,
-                weekEnd,
-                summary: summaryText,
-                stats: JSON.stringify(stats),
-            },
-        });
+        // Save to DB (update this week's summary if one exists)
+        const summary = existingSummary
+            ? await prisma.weeklySummary.update({
+                where: { id: existingSummary.id },
+                data: { summary: summaryText, stats: JSON.stringify(stats) },
+            })
+            : await prisma.weeklySummary.create({
+                data: {
+                    userId,
+                    weekStart,
+                    weekEnd,
+                    summary: summaryText,
+                    stats: JSON.stringify(stats),
+                },
+            });
 
         res.json(summary);
     } catch (error: any) {

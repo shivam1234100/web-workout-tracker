@@ -8,13 +8,13 @@ A full-stack AI-powered workout tracker with personalized coaching, exercise lib
 
 ## ✨ Features
 
-- **🔐 Authentication** — Secure signup, login, and password reset with email verification
-- **📊 Dashboard** — Personalized greeting, motivational quotes, workout stats, and recent activity
-- **💪 Workout Tracking** — Live timer, exercise selection from 27+ exercises, set/rep/weight logging
-- **📚 Exercise Library** — Searchable database with muscle group filters and exercise details
-- **📅 Workout History** — View past workouts with detailed breakdowns, delete old entries
-- **🤖 AI Coach** — Chat with an AI fitness coach powered by GPT-3.5 Turbo for personalized advice
-- **📈 Weekly Insights** — AI-generated weekly summaries with stats and progress analysis
+- **🔐 Authentication** — JWT-based signup/login with bcrypt-hashed passwords, and password reset via a 6-digit emailed code (1-hour expiry, single use)
+- **📊 Dashboard** — Personalized greeting, daily motivational quote, workout stats, and recent activity
+- **💪 Workout Tracking** — Live session timer, set/rep/weight logging with completion checkmarks, add/remove sets and exercises; the in-progress session survives page refreshes
+- **📚 Exercise Library** — 27 exercises with search, muscle-group and difficulty filters, step-by-step instructions, and tutorial links
+- **📅 Workout History** — Past workouts with per-set breakdowns, duration, and delete
+- **🤖 AI Coach** — Chat with an OpenAI-powered coach that reads your real training data (PRs, volume, progression trends, recent sessions) to give personalized advice; falls back to a rule-based offline coach when no API key is set
+- **📈 Weekly Insights** — Monday–Sunday stats (volume, sets, reps, time) plus an AI-written weekly review that refreshes as you log workouts
 - **👤 Profile** — Manage name, height, weight, and gender
 - **📱 Fully Responsive** — Mobile-first design with bottom nav bar and sidebar overlay
 
@@ -27,7 +27,7 @@ A full-stack AI-powered workout tracker with personalized coaching, exercise lib
 | **Frontend** | React 18 + Vite 6 |
 | **Backend** | Express.js + TypeScript |
 | **Database** | MongoDB (via Prisma ORM) |
-| **AI** | OpenAI GPT-3.5 Turbo |
+| **AI** | OpenAI Chat Completions (`gpt-4o-mini` by default) |
 | **Hosting** | Vercel (frontend) + Render (backend) + MongoDB Atlas (database) |
 
 ---
@@ -38,6 +38,7 @@ A full-stack AI-powered workout tracker with personalized coaching, exercise lib
 ├── client/                  # React frontend
 │   ├── src/
 │   │   ├── pages/           # 10 page components
+│   │   ├── components/      # Shared UI (AI text formatting)
 │   │   ├── context/         # Auth & Workout state management
 │   │   ├── constants/       # API config, mock data
 │   │   ├── App.jsx          # Router + sidebar + mobile nav
@@ -57,6 +58,8 @@ A full-stack AI-powered workout tracker with personalized coaching, exercise lib
 │   ├── prisma/
 │   │   └── schema.prisma    # Database models
 │   └── server.ts            # Express app entry
+│
+└── render.yaml              # Render Blueprint for the backend
 ```
 
 ---
@@ -81,18 +84,12 @@ cd web-workout-tracker
 cd backend
 npm install
 
-# Create .env file
-cat > .env << EOF
-DATABASE_URL=mongodb+srv://YOUR_USER:YOUR_PASS@cluster.mongodb.net/ai-workout-tracker
-JWT_SECRET=your-secret-key
-PORT=3000
-OPENAI_API_KEY=sk-...        # Optional: enables AI Coach
-RESEND_API_KEY=re_...         # Optional: enables email reset
-EOF
+# Create .env from the template and fill in DATABASE_URL and JWT_SECRET
+cp .env.example .env
 
-npx prisma generate
-npx tsc
-node dist/server.js
+npm run db:push   # creates collections and indexes (e.g. unique email)
+npm run build
+npm start
 # → Backend running on http://localhost:3000
 ```
 
@@ -109,28 +106,39 @@ npm run dev
 
 ## 🌐 Deployment
 
-| Service | Platform | Config |
+| Service | Platform | Notes |
 |---|---|---|
-| **Database** | MongoDB Atlas | Free M0 cluster |
-| **Backend** | Render | Build: `npm install && npm run build`, Start: `npm start` |
-| **Frontend** | Vercel | Auto-detected Vite, env: `VITE_API_URL=https://your-backend.onrender.com` |
+| **Database** | MongoDB Atlas | Free M0 cluster. Network Access must allow `0.0.0.0/0` (Render has no fixed IPs) |
+| **Backend** | Render | Root dir `backend`. Build: `npm ci && npm run db:push && npm run build`, Start: `npm start`, Health check: `/health`. Or use the included `render.yaml` Blueprint |
+| **Frontend** | Vercel | Root dir `client`, framework Vite, env `VITE_API_URL` |
+
+### Step by step
+
+1. **MongoDB Atlas** — create a free M0 cluster → *Database Access*: add a user → *Network Access*: add `0.0.0.0/0` → *Connect → Drivers*: copy the connection string and add the database name before the `?` (e.g. `...mongodb.net/ai-workout-tracker?retryWrites=true&w=majority`).
+2. **Render** — *New → Blueprint* and pick this repo (uses `render.yaml`), or *New → Web Service* with the settings above. Set `DATABASE_URL`, and optionally `OPENAI_API_KEY` / `RESEND_API_KEY`. After the deploy, open `https://<your-service>.onrender.com/health` — it should return `{"status":"ok"}`.
+3. **Vercel** — *Add New → Project*, import this repo, set **Root Directory** to `client`, add `VITE_API_URL=https://<your-service>.onrender.com`, deploy.
+4. Back on Render, set `FRONTEND_URL` to your Vercel URL so CORS allows it.
+
+> Render's free tier sleeps after ~15 minutes idle; the first request then takes ~30–60s. The app pings the API on load and shows a "waking up the server" hint on login.
 
 ### Environment Variables
 
 **Backend (Render):**
 | Variable | Required | Description |
 |---|---|---|
-| `DATABASE_URL` | ✅ | MongoDB connection string |
-| `JWT_SECRET` | ✅ | JWT signing key |
-| `PORT` | ✅ | Server port (3000) |
-| `OPENAI_API_KEY` | ❌ | Enables AI Coach (GPT-3.5) |
-| `RESEND_API_KEY` | ❌ | Enables email password reset |
-| `FRONTEND_URL` | ❌ | Vercel URL for CORS |
+| `DATABASE_URL` | ✅ | MongoDB connection string (including database name) |
+| `JWT_SECRET` | ✅ | Long random string for signing login tokens |
+| `NODE_ENV` | ✅ | `production` (never exposes reset codes in API responses) |
+| `PORT` | ❌ | Set automatically by Render |
+| `FRONTEND_URL` | ❌ | Vercel URL(s) for CORS, comma-separated |
+| `OPENAI_API_KEY` | ❌ | Enables real AI responses (offline coach otherwise) |
+| `OPENAI_MODEL` | ❌ | Defaults to `gpt-4o-mini` |
+| `RESEND_API_KEY` | ❌ | Emails password reset codes. With Resend's test sender, mail is only delivered to your own Resend account email unless you verify a domain |
 
 **Frontend (Vercel):**
 | Variable | Required | Description |
 |---|---|---|
-| `VITE_API_URL` | ✅ | Render backend URL |
+| `VITE_API_URL` | ✅ | Render backend URL (no trailing slash) |
 
 ---
 
@@ -140,7 +148,7 @@ npm run dev
 Premium dark theme with stats cards, motivational quotes, and recent workout activity.
 
 ### AI Coach
-Chat interface with GPT-3.5 powered personalized fitness advice based on your workout history.
+Chat interface with AI-powered fitness advice based on your workout history.
 
 ### Workout Tracking
 Live workout timer, exercise selection, and set/rep/weight logging with completion tracking.
@@ -156,7 +164,7 @@ Live workout timer, exercise selection, and set/rep/weight logging with completi
 | `GET` | `/auth/profile` | Get user profile |
 | `PUT` | `/auth/profile` | Update profile (name, height, weight, gender) |
 | `POST` | `/auth/forgot-password` | Request password reset |
-| `POST` | `/auth/reset-password` | Reset password with code |
+| `POST` | `/auth/reset-password` | Reset password with email + code |
 | `GET` | `/workouts` | Get user workouts |
 | `POST` | `/workouts` | Save a workout |
 | `DELETE` | `/workouts/:id` | Delete a workout |
@@ -165,6 +173,7 @@ Live workout timer, exercise selection, and set/rep/weight logging with completi
 | `DELETE` | `/ai/history` | Clear chat history |
 | `POST` | `/summary/weekly` | Generate weekly summary |
 | `GET` | `/summary/weekly` | Get past summaries |
+| `GET` | `/health` | Health check |
 
 ---
 

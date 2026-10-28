@@ -6,10 +6,9 @@ import { authenticateToken } from '../middleware/auth';
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Initialize OpenAI — uses OPENAI_API_KEY from .env
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY || 'mock_key',
-});
+// Initialize OpenAI only when a key is configured; otherwise the offline coach is used
+const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 // ─────────────────────────────────────────────
 // HELPER: Build a user training profile from workout data
@@ -121,7 +120,8 @@ function generateOfflineResponse(query: string, workouts: any[]): string {
         const lastWorkout = workouts[0];
         const exerciseNames = lastWorkout.exercises?.map((e: any) => e.name).join(', ') || 'various exercises';
         const daysSinceLastWorkout = Math.floor((Date.now() - new Date(lastWorkout.date).getTime()) / (1000 * 60 * 60 * 24));
-        personalContext = ` Based on your data, your last workout was ${daysSinceLastWorkout} days ago and included ${exerciseNames}.`;
+        const when = daysSinceLastWorkout === 0 ? 'today' : daysSinceLastWorkout === 1 ? 'yesterday' : `${daysSinceLastWorkout} days ago`;
+        personalContext = ` Based on your data, your last workout was ${when} and included ${exerciseNames}.`;
     }
 
     // ── Conversational / Social responses ──
@@ -208,12 +208,12 @@ router.post('/chat', authenticateToken, async (req: any, res) => {
         // 2. Build the user training profile
         const userProfile = buildUserProfile(workouts);
 
-        // 3. Fetch recent chat history for conversation context (last 20 messages)
-        const chatHistory = await prisma.chatMessage.findMany({
+        // 3. Fetch recent chat history for conversation context (last 20 messages, oldest first)
+        const chatHistory = (await prisma.chatMessage.findMany({
             where: { userId },
-            orderBy: { createdAt: 'asc' },
+            orderBy: { createdAt: 'desc' },
             take: 20,
-        });
+        })).reverse();
 
         // 4. Save the user's message to DB
         await prisma.chatMessage.create({
@@ -249,9 +249,11 @@ INSTRUCTIONS:
         let assistantContent: string;
 
         try {
+            if (!openai) throw new Error('OPENAI_API_KEY not configured');
+
             // 7. Call OpenAI
             const completion = await openai.chat.completions.create({
-                model: 'gpt-3.5-turbo',
+                model: OPENAI_MODEL,
                 messages: openaiMessages,
                 max_tokens: 500,
                 temperature: 0.7,

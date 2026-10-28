@@ -1,17 +1,18 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "dist/server.js",
   "scripts": {
     "dev": "npx ts-node server.ts",
     "build": "npx prisma generate && tsc",
+    "db:push": "npx prisma db push --skip-generate",
     "start": "node dist/server.js",
     "generate": "npx prisma generate"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "REST API for AI Workout Tracker",
   "dependencies": {
     "@prisma/client": "^5.22.0",
     "@types/bcryptjs": "^3.0.0",
@@ -33,5 +34,8 @@
   },
   "devDependencies": {
     "@types/nodemailer": "^7.0.5"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

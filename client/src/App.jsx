@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate, NavLink, useNavigate, useLocation } from 'react-router-dom';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { API_URL } from './constants/api';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { WorkoutProvider } from './context/WorkoutContext';
 import { Home, Dumbbell, History, Bot, TrendingUp, User, LogOut, Library, Menu, X } from 'lucide-react';
@@ -143,6 +144,9 @@ function AppLayout() {
 }
 
 export default function App() {
+    // Wake the backend early: free hosting tiers sleep when idle and take ~30s to start
+    useEffect(() => { fetch(`${API_URL}/health`).catch(() => { }); }, []);
+
     return (
         <BrowserRouter>
             <AuthProvider>

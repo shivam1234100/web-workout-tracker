@@ -14,27 +14,33 @@ const JWT_SECRET = process.env.JWT_SECRET || 'secret';
 // Only initialize if API key is available to avoid crash on startup
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
-// DEV ONLY: Delete all users (remove this in production!)
-router.delete('/delete-all-users', async (req, res) => {
-    try {
-        // First delete all workouts and exercises (due to relations)
-        await prisma.exercise.deleteMany({});
-        await prisma.workout.deleteMany({});
-        await prisma.user.deleteMany({});
-        res.json({ message: 'All users deleted successfully' });
-    } catch (error) {
-        console.error("Delete Error:", error);
-        res.status(500).json({ error: 'Error deleting users' });
-    }
-});
+// Without a working email provider, the reset code is returned in the API response so the
+// flow can be tested locally. Never do this in production: it would let anyone reset any account.
+const exposeResetCode = process.env.NODE_ENV !== 'production';
+
+const normalizeEmail = (email: unknown) => typeof email === 'string' ? email.trim().toLowerCase() : '';
+// Case-insensitive match so accounts created before emails were normalized still work
+const emailWhere = (email: string) => ({ email: { equals: email, mode: 'insensitive' as const } });
 
 
 // Register
 router.post('/register', async (req, res) => {
     try {
-        const { email, password, name } = req.body;
+        const email = normalizeEmail(req.body.email);
+        const { password } = req.body;
+        const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
 
-        const existingUser = await prisma.user.findUnique({ where: { email } });
+        if (!email || !name || typeof password !== 'string') {
+            return res.status(400).json({ error: 'Name, email and password are required' });
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            return res.status(400).json({ error: 'Please enter a valid email address' });
+        }
+        if (password.length < 6) {
+            return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        }
+
+        const existingUser = await prisma.user.findFirst({ where: emailWhere(email) });
         if (existingUser) return res.status(400).json({ error: 'User already exists' });
 
         const hashedPassword = await bcrypt.hash(password, 10);
@@ -54,17 +60,23 @@ router.post('/register', async (req, res) => {
 // Login
 router.post('/login', async (req, res) => {
     try {
-        const { email, password } = req.body;
-        const user = await prisma.user.findUnique({ where: { email } });
+        const email = normalizeEmail(req.body.email);
+        const { password } = req.body;
+        if (!email || typeof password !== 'string') {
+            return res.status(400).json({ error: 'Email and password are required' });
+        }
 
-        if (!user) return res.status(400).json({ error: 'User not found' });
+        const user = await prisma.user.findFirst({ where: emailWhere(email) });
 
-        const validPass = await bcrypt.compare(password, user.password);
-        if (!validPass) return res.status(401).json({ error: 'Wrong password' });
+        // Same message for unknown email and wrong password, so accounts can't be enumerated
+        if (!user || !(await bcrypt.compare(password, user.password))) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
 
         const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
         res.json({ token, user: { id: user.id, name: user.name, email: user.email, height: user.height, weight: user.weight, gender: user.gender } });
     } catch (error) {
+        console.error("Login Error:", error);
         res.status(500).json({ error: 'Error logging in' });
     }
 });
@@ -72,9 +84,10 @@ router.post('/login', async (req, res) => {
 // Forgot Password - Generate and send reset code
 router.post('/forgot-password', async (req, res) => {
     try {
-        const { email } = req.body;
+        const email = normalizeEmail(req.body.email);
+        if (!email) return res.status(400).json({ error: 'Email is required' });
 
-        const user = await prisma.user.findUnique({ where: { email } });
+        const user = await prisma.user.findFirst({ where: emailWhere(email) });
         if (!user) {
             return res.status(404).json({ error: 'No account found with this email' });
         }
@@ -85,7 +98,7 @@ router.post('/forgot-password', async (req, res) => {
 
         // Save code to database
         await prisma.user.update({
-            where: { email },
+            where: { id: user.id },
             data: {
                 resetToken: resetCode,
                 resetTokenExpiry
@@ -121,12 +134,15 @@ router.post('/forgot-password', async (req, res) => {
             }
         }
 
-        // Return response - include code for demo if email not configured
+        if (!emailSent && !exposeResetCode) {
+            return res.status(503).json({ error: 'Password reset email could not be sent. Please try again later.' });
+        }
+
         res.json({
             message: emailSent
                 ? 'Password reset code sent to your email'
                 : 'Password reset code generated',
-            resetCode: emailSent ? undefined : resetCode, // Only show code if email wasn't sent
+            resetCode: emailSent ? undefined : resetCode, // dev only: shown when no email was sent
             emailSent
         });
     } catch (error) {
@@ -138,12 +154,21 @@ router.post('/forgot-password', async (req, res) => {
 // Reset Password - Verify code and update password
 router.post('/reset-password', async (req, res) => {
     try {
+        const email = normalizeEmail(req.body.email);
         const { token, newPassword } = req.body;
 
-        // Find user with valid reset code
+        if (!email || typeof token !== 'string' || !token || typeof newPassword !== 'string') {
+            return res.status(400).json({ error: 'Email, reset code and new password are required' });
+        }
+        if (newPassword.length < 6) {
+            return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        }
+
+        // Find user with valid reset code (scoped to the email so codes can't be guessed across accounts)
         const user = await prisma.user.findFirst({
             where: {
-                resetToken: token,
+                ...emailWhere(email),
+                resetToken: token.trim(),
                 resetTokenExpiry: {
                     gt: new Date()
                 }

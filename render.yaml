@@ -1,0 +1,25 @@
+# Render Blueprint for the backend API: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: web-workout-tracker
+    runtime: node
+    plan: free
+    rootDir: backend
+    buildCommand: npm ci && npm run db:push && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: FRONTEND_URL
+        value: https://web-workout-tracker.vercel.app
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false

@@ -10,6 +10,7 @@ export default function SignupPage() {
     const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    const [slow, setSlow] = useState(false);
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -17,12 +18,15 @@ export default function SignupPage() {
         if (password.length < 6) { setError('Password must be at least 6 characters'); return; }
         setLoading(true);
         setError('');
+        const slowTimer = setTimeout(() => setSlow(true), 5000);
         try {
             await signUp(email, password, name);
             navigate('/dashboard');
         } catch (err) {
             setError(err.message || 'Signup failed');
         } finally {
+            clearTimeout(slowTimer);
+            setSlow(false);
             setLoading(false);
         }
     };
@@ -54,6 +58,7 @@ export default function SignupPage() {
                         {loading ? <div className="spinner" style={{ width: 20, height: 20, borderWidth: 2 }} /> : 'Sign Up'}
                     </button>
                 </form>
+                {slow && <p className="text-muted text-sm" style={{ textAlign: 'center', marginTop: 12 }}>Waking up the server — the first request can take up to a minute.</p>}
                 <div className="auth-link">
                     Already have an account? <Link to="/login">Log in</Link>
                 </div>

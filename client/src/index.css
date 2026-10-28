@@ -792,6 +792,8 @@ body {
   border-radius: var(--radius-lg);
   font-size: 14px;
   line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .chat-bubble.assistant .message-content {
@@ -971,7 +973,7 @@ body {
 
 .set-row-header {
   display: grid;
-  grid-template-columns: 50px 1fr 1fr 50px;
+  grid-template-columns: 50px 1fr 1fr 50px 32px;
   gap: 8px;
   padding: 0 4px 8px;
 }
@@ -987,7 +989,7 @@ body {
 
 .set-row {
   display: grid;
-  grid-template-columns: 50px 1fr 1fr 50px;
+  grid-template-columns: 50px 1fr 1fr 50px 32px;
   gap: 8px;
   align-items: center;
   padding: 6px 4px;
@@ -1028,6 +1030,43 @@ body {
   background: var(--bg-card-hover);
   color: var(--text-muted);
   border: 1px solid var(--border-color);
+}
+
+.workout-exercise-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.set-remove-btn {
+  width: 28px;
+  height: 28px;
+  margin: 0 auto;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.workout-exercise-header .set-remove-btn {
+  margin: 0;
+}
+
+.set-remove-btn:hover:not(:disabled) {
+  background: var(--accent-red-glow);
+  color: var(--accent-red);
+}
+
+.set-remove-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 /* ── Animations ── */
@@ -1781,7 +1820,7 @@ body {
 
   .set-row-header,
   .set-row {
-    grid-template-columns: 40px 1fr 1fr 40px;
+    grid-template-columns: 32px 1fr 1fr 36px 28px;
     gap: 6px;
   }
 

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useWorkout } from '../context/WorkoutContext';
 import { API_URL } from '../constants/api';
+import FormattedText from '../components/FormattedText';
 import { Send, Bot, User, Plus, Trash2, MessageSquare } from 'lucide-react';
 
 function generateOfflineResponse(query, workoutHistory) {
@@ -11,7 +12,7 @@ function generateOfflineResponse(query, workoutHistory) {
         const last = workoutHistory[0];
         const names = last.exercises?.map(e => e.name).join(', ') || 'exercises';
         const days = Math.floor((Date.now() - new Date(last.endTime || last.date).getTime()) / 86400000);
-        ctx = ` Your last workout was ${days}d ago (${names}).`;
+        ctx = ` Your last workout was ${days === 0 ? 'today' : `${days}d ago`} (${names}).`;
     }
     // Conversational
     if (/^(thanks|thank you|thx|ty|appreciate|cheers)/i.test(lq)) return `You're welcome! 💪 Keep pushing and let me know if you need anything else!`;
@@ -176,7 +177,7 @@ export default function AICoachPage() {
                                     {msg.role === 'assistant' ? <Bot size={16} /> : <User size={16} />}
                                 </div>
                                 <div>
-                                    <div className="message-content">{msg.content}</div>
+                                    <div className="message-content"><FormattedText text={msg.content} /></div>
                                     {msg.createdAt && msg.id !== 'welcome' && (
                                         <div className="message-time">{new Date(msg.createdAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</div>
                                     )}

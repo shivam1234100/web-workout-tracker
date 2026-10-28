@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { API_URL } from '../constants/api';
+import FormattedText from '../components/FormattedText';
 import { Dumbbell, Clock, Flame, TrendingUp, Calendar, ChevronDown, ChevronUp } from 'lucide-react';
 
 export default function WeeklySummaryPage() {
@@ -19,7 +20,12 @@ export default function WeeklySummaryPage() {
     const generateCurrentWeekSummary = async () => {
         setIsGenerating(true);
         try {
-            const res = await fetch(`${API_URL}/summary/weekly`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` } });
+            const res = await fetch(`${API_URL}/summary/weekly`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                // lets the server compute Monday–Sunday in the user's timezone
+                body: JSON.stringify({ tzOffset: new Date().getTimezoneOffset() }),
+            });
             if (res.ok) setCurrentSummary(await res.json());
         } catch (err) { console.error(err); }
         finally { setIsGenerating(false); }
@@ -106,7 +112,7 @@ export default function WeeklySummaryPage() {
             {currentSummary && (
                 <div className="summary-ai-card" style={{ marginBottom: 32 }}>
                     <h3>🤖 AI Coach Analysis</h3>
-                    <div className="summary-text">{currentSummary.summary}</div>
+                    <div className="summary-text"><FormattedText text={currentSummary.summary} /></div>
                 </div>
             )}
 
@@ -127,7 +133,7 @@ export default function WeeklySummaryPage() {
                                         </div>
                                         {isExpanded ? <ChevronUp size={18} color="var(--text-muted)" /> : <ChevronDown size={18} color="var(--text-muted)" />}
                                     </div>
-                                    {isExpanded && <div className="week-expanded">{summary.summary}</div>}
+                                    {isExpanded && <div className="week-expanded"><FormattedText text={summary.summary} /></div>}
                                 </div>
                             );
                         })}

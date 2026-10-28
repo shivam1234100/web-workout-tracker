@@ -1,13 +1,23 @@
 import { useState, useEffect } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useWorkout } from '../context/WorkoutContext';
 import { Calendar, ChevronRight, Trash2, X, ArrowLeft, Dumbbell, Clock } from 'lucide-react';
 
 export default function HistoryPage() {
     const { history, fetchHistory, deleteWorkout } = useWorkout();
-    const [selectedWorkout, setSelectedWorkout] = useState(null);
+    const location = useLocation();
+    const navigate = useNavigate();
+    // Dashboard's "Recent Activity" links here with the workout to open
+    const [selectedWorkout, setSelectedWorkout] = useState(location.state?.viewWorkout || null);
     const [deleteConfirm, setDeleteConfirm] = useState(null);
+    const [deleteError, setDeleteError] = useState('');
 
     useEffect(() => { fetchHistory(); }, [fetchHistory]);
+
+    useEffect(() => {
+        // Clear the router state so a refresh/back doesn't reopen the same workout
+        if (location.state?.viewWorkout) navigate(location.pathname, { replace: true, state: null });
+    }, []);
 
     const getSets = (sets) => {
         if (!sets) return [];
@@ -16,9 +26,11 @@ export default function HistoryPage() {
         return [];
     };
 
-    const handleDelete = (id) => {
-        deleteWorkout(id);
+    const handleDelete = async (id) => {
         setDeleteConfirm(null);
+        const deleted = await deleteWorkout(id);
+        if (!deleted) { setDeleteError('Could not delete workout. Please try again.'); return; }
+        setDeleteError('');
         if (selectedWorkout?.id === id) setSelectedWorkout(null);
     };
 
@@ -72,6 +84,7 @@ export default function HistoryPage() {
             <div className="page-header">
                 <h1>Workout History</h1>
             </div>
+            {deleteError && <div className="alert alert-error mb-16">{deleteError}</div>}
 
             {/* Summary Cards */}
             <div className="stats-grid" style={{ marginBottom: 28, gridTemplateColumns: 'repeat(2, 1fr)' }}>

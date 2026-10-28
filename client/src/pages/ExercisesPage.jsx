@@ -6,7 +6,7 @@ import { Search, ChevronRight, X, PlayCircle, ExternalLink } from 'lucide-react'
 
 export default function ExercisesPage() {
     const navigate = useNavigate();
-    const { activeWorkout, startWorkout, addExercise } = useWorkout();
+    const { addExercise } = useWorkout();
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedBodyPart, setSelectedBodyPart] = useState('All');
     const [selectedDifficulty, setSelectedDifficulty] = useState('All');
@@ -29,9 +29,6 @@ export default function ExercisesPage() {
     });
 
     const handleAddToWorkout = (exercise) => {
-        if (!activeWorkout) {
-            startWorkout();
-        }
         addExercise(exercise);
         setSelectedExercise(null);
         navigate('/workout');

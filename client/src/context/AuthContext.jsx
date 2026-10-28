@@ -13,9 +13,19 @@ export function AuthProvider({ children }) {
         const savedToken = localStorage.getItem('auth_token');
         const savedUser = localStorage.getItem('auth_user');
         if (savedToken && savedUser) {
-            setToken(savedToken);
-            setUser(JSON.parse(savedUser));
-            setIsAuthenticated(true);
+            try {
+                setToken(savedToken);
+                setUser(JSON.parse(savedUser));
+                setIsAuthenticated(true);
+            } catch {
+                localStorage.removeItem('auth_token');
+                localStorage.removeItem('auth_user');
+            }
+            // Log out if the saved token has expired (tokens last 7 days).
+            // Network errors are ignored so a sleeping server doesn't log anyone out.
+            fetch(`${API_URL}/auth/profile`, { headers: { Authorization: `Bearer ${savedToken}` } })
+                .then(res => { if (res.status === 401 || res.status === 403) signOut(); })
+                .catch(() => { });
         }
         setLoading(false);
     }, []);
